@@ -12,14 +12,15 @@
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
- * Import `lib/index.js` through the installed profile when one exists.
+ * Import `lib/index.js`, either from a path given on the command line or from
+ * an installed profile.
  *
  * The host half imports `@deepseek-ai/schemastery`, which dsh supplies to a
  * plugin from the installation's module fallback rather than from the plugin's
@@ -27,8 +28,16 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..')
  * this check also proves the plugin's runtime dependencies actually resolve at
  * the place dsh will load it from. Falling back to the direct path keeps the
  * check usable in a bare checkout.
+ *
+ * Note that importing through a directory junction resolves to its real path,
+ * so pass the installed `lib/index.js` explicitly to exercise a published copy
+ * rather than a linked one.
  */
 async function importHost() {
+  const explicit = process.argv[2] ?? process.env.DSH_FONT_HOST
+  if (explicit !== undefined) {
+    return { host: await import(pathToFileURL(resolve(explicit)).href), via: resolve(explicit) }
+  }
   const dshHome = process.env.DSH_HOME
   const profile = process.env.DSH_PROFILE ?? 'web'
   if (dshHome !== undefined) {
@@ -37,7 +46,7 @@ async function importHost() {
       try {
         // Resolve the bare specifier: `exports` maps "." to lib/index.js, and a
         // direct `dsh-font/lib/index.js` path is deliberately not exported.
-        const resolved = createRequire(anchor).resolve('dsh-font')
+        const resolved = createRequire(anchor).resolve('@citisen/dsh-font')
         return { host: await import(pathToFileURL(resolved).href), via: resolved }
       } catch {
         /* not installed in that profile; fall through to the direct import */
