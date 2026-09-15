@@ -44,6 +44,8 @@ dsh --profile web
 
 `dsh plugin` 会在 profile 目录里转发给 pnpm，然后对 `dsh.profile.bundles` 做一次对账：由于本包声明了 `dsh.bundle`，安装时会自动把它追加为一个 profile 层，无需手工修改 `cordis.patch.yml`。
 
+这两条路径都在全新 profile 上实测过：这一行会进入最终 entry 列表，浏览器 roster 也能解析到客户端 bundle。装完后可以用 `node scripts/verify-profile.mjs <profile>` 自己确认。
+
 ### 从本地目录安装
 
 在 Windows 上，如果 profile 和代码目录位于**不同盘符**，`dsh plugin --profile web add <路径>` 不可靠——pnpm 会把跨盘符的目录链接解析成一个不存在的路径，随后对账会认为该包没有声明 `dsh.bundle`，于是不把它写进 `bundles`。这时请自己建立链接：

@@ -41,7 +41,7 @@ without changing how much message text fits on screen, and vice versa.
 dsh plugin --profile web add @citisen/dsh-font
 ```
 
-Straight from GitHub instead of npm (identical package, no registry involved):
+Straight from GitHub (identical package, no registry involved):
 
 ```sh
 dsh plugin --profile web add github:citisen/dsh-font
@@ -57,6 +57,10 @@ dsh --profile web
 `dsh.profile.bundles`: because this package declares `dsh.bundle`, the install
 appends it as a profile layer automatically. Nothing has to be hand-edited in
 `cordis.patch.yml`.
+
+Both paths are verified end to end on a fresh profile — the row reaches the
+composed entry list and the browser roster resolves the client bundle. Confirm
+it yourself with `node scripts/verify-profile.mjs <profile>` after installing.
 
 ### Installing from a local checkout
 
