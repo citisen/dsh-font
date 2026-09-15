@@ -146,7 +146,7 @@ dsh --profile web
 
 ### 发布
 
-发布**只**由 GitHub Actions 通过 npm trusted publishing 完成；本仓库里没有 `NPM_TOKEN`，也不应该出现。一次性配置、这套机制能防什么与不能防什么、以及发布步骤都写在 [PUBLISHING.md](PUBLISHING.md)。
+发布先由 GitHub Actions 通过 npm trusted publishing 完成**暂存（stage）**，再由维护者审批，因此本仓库里没有 `NPM_TOKEN`，也不应该出现。一次性配置、这套机制能防什么与不能防什么、以及发布步骤都写在 [PUBLISHING.md](PUBLISHING.md)。
 
 ## 包结构
 
@@ -157,7 +157,7 @@ dsh --profile web
 | `src/client.js` | 浏览器半边源码。 |
 | `cordis.patch.yml` | 本 bundle 贡献的 profile 层。 |
 | `scripts/` | 构建与校验脚本。 |
-| `.github/workflows/publish.yml` | 唯一的发布路径。 |
+| `.github/workflows/stage.yml` | 唯一发布路径的 CI 半边。 |
 | `PUBLISHING.md` | 发布与 trusted publishing 配置。 |
 | `package.json` | 声明 `dsh.bundle`（profile 层）与 `dsh.client`（浏览器节点）。 |
 

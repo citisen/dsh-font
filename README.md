@@ -216,10 +216,10 @@ convenience rather than a requirement.
 
 ### Releasing
 
-Releases are published by GitHub Actions over npm trusted publishing; there is
-no `NPM_TOKEN` in this repository and there should never be one. See
-[PUBLISHING.md](PUBLISHING.md) for the one-time npm setup, what that does and
-does not protect against, and the release steps.
+Releases are staged by GitHub Actions over npm trusted publishing and then
+approved by a maintainer, so no `NPM_TOKEN` exists in this repository and none
+should ever be added. See [PUBLISHING.md](PUBLISHING.md) for the one-time npm
+setup, what this does and does not protect against, and the release steps.
 
 ## Package layout
 
@@ -230,7 +230,7 @@ does not protect against, and the release steps.
 | `src/client.js` | Browser-half source. |
 | `cordis.patch.yml` | The profile layer this bundle contributes. |
 | `scripts/` | Build and verification scripts. |
-| `.github/workflows/publish.yml` | The only publishing path. |
+| `.github/workflows/stage.yml` | The CI half of the only publishing path. |
 | `PUBLISHING.md` | Release and trusted-publishing setup. |
 | `package.json` | Declares `dsh.bundle` (profile layer) and `dsh.client` (browser roster entry). |
 

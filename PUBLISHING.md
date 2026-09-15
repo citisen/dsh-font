@@ -1,117 +1,150 @@
 # Publishing
 
-`@citisen/dsh-font` is published **only** from GitHub Actions, using npm
-[trusted publishing](https://docs.npmjs.com/trusted-publishers). There is no
-`NPM_TOKEN` in this repository and there must never be one.
+`@citisen/dsh-font` is published in two halves:
+
+1. **CI stages** a tarball — `.github/workflows/stage.yml`, over npm
+   [trusted publishing](https://docs.npmjs.com/trusted-publishers). No secret
+   is involved.
+2. **A human approves** it, via [staged publishing](https://docs.npmjs.com/staged-publishing),
+   which requires that human's 2FA.
+
+There is no `NPM_TOKEN` in this repository and there must never be one.
 
 ## Why this is safer than a token
 
 A publish token is a bearer secret: anything that can read it can publish to
-the package forever, from anywhere, until someone notices and rotates it. It
-also generally has to bypass 2FA to be usable by a machine, so it removes the
-one control that would otherwise stop an attacker.
+the package from anywhere, forever, until someone notices and rotates it. It
+usually has to bypass 2FA to be usable by a machine, which removes the one
+control that would otherwise stop an attacker.
 
 Trusted publishing replaces the secret with a **short-lived OIDC identity**
-that GitHub mints per workflow run and npm exchanges for a publish grant. There
-is nothing to steal, nothing to leak in a log, and nothing to rotate. The grant
-is scoped to this repository, this workflow file, and — if you configure it —
-this environment, so it cannot be replayed from another repo or a laptop.
+that GitHub mints per run and npm exchanges for a staging grant. Nothing to
+steal, nothing to leak into a log, nothing to rotate. The grant is scoped to
+this repository, this workflow file, and the `npm-publish` environment, so it
+cannot be replayed from another repo or a laptop. npm attaches a signed
+provenance attestation automatically.
 
-npm also attaches a signed provenance attestation automatically, which lets
-anyone verify that the published tarball was built from this commit by this
-workflow.
+## Why staged rather than direct
 
-## What it does not protect against
+npm's trusted-publisher form offers an **Allowed actions** checkbox for
+`npm publish`, and warns that leaving it unchecked is stronger. That warning is
+correct, and this repository leaves it **unchecked**.
 
-Be precise about the threat model, because the gap is easy to miss:
+Checked, the workflow's OIDC grant can publish unattended — so anything that can
+run the workflow puts a version on the registry and makes it installable,
+immediately, with no further check.
 
-- **It does not stop someone who can push to this repo.** If they can commit to
-  a branch the publish workflow runs from, they can run the workflow and
-  publish. Trusted publishing moves the trust boundary from "whoever holds the
-  token" to "whoever can push" — which is only an improvement if pushing is
-  actually harder than holding a token.
-  **Enable branch protection on `main`** (require PRs, require review, no force
-  pushes) and prefer a protected `npm-publish` environment with required
-  reviewers.
-- **It does not by itself revoke existing tokens.** If a bypass-2FA automation
-  token exists for this account, it can still publish. Removing those is a
-  separate step below, and skipping it leaves the old door open.
-- **A compromised GitHub account or a malicious dependency in this repo's CI**
-  can still misuse the grant. Keep the workflow's dependency surface small and
-  pin third-party actions to commit SHAs if you add any.
+Unchecked, the same grant can only *stage*. `npm stage publish` uploads the
+tarball and stops; nothing is installable, and `npm view` still reports the
+previous version. Publishing then needs `npm stage approve`, which npm gates on
+the maintainer's 2FA. A compromised runner, a malicious commit, or a bad
+dependency in CI gets as far as a staged tarball that a human still has to look
+at and approve.
+
+That human step is also what currently holds the security boundary, because
+**`main` has no branch protection**:
+
+```
+$ gh api repos/citisen/dsh-font/branches/main/protection
+gh: Branch not protected (HTTP 404)
+```
+
+Trusted publishing moves the trust boundary from *whoever holds the token* to
+*whoever can push*. With `main` unprotected those are close to the same set of
+people, so without staging this would not have been a real improvement. Staging
+adds back the missing gate.
+
+**The strongest configuration is all three: staging, a protected `main`, and a
+protected `npm-publish` environment.** Enabling branch protection on `main`
+(require a PR and a review, no force pushes) is the remaining step, and it is
+worth doing even for a single-maintainer repo.
 
 ## One-time setup
 
 ### 1. Configure the trusted publisher on npm
 
-Open <https://www.npmjs.com/package/@citisen/dsh-font/access> → **Trusted
+<https://www.npmjs.com/package/@citisen/dsh-font/access> → **Trusted
 Publishers** → *Add a trusted publisher* → **GitHub Actions**, and enter exactly:
 
 | Field | Value |
 | --- | --- |
 | Organization or user | `citisen` |
 | Repository | `dsh-font` |
-| Workflow filename | `publish.yml` |
+| Workflow filename | `stage.yml` |
 | Environment | `npm-publish` |
-| Allowed actions | `npm publish` |
+| Allowed actions | leave **`npm publish` UNCHECKED** (staged publishing only) |
 
 The filename is matched literally and must live at
-`.github/workflows/publish.yml`. **Renaming or moving that file stops
-publishing** until you update this setting. The environment field must match
-the `environment:` key in the workflow; leave both empty/unset if you would
-rather not gate releases on reviewer approval.
+`.github/workflows/stage.yml`. **Renaming or moving that file stops CI staging**
+until you update this setting. The environment must match the `environment:`
+key in the workflow; to skip the reviewer gate, remove that key from both.
 
-### 2. Make the publish workflow the only path
+### 2. Set publishing access, then revoke every token
 
-On the same page, set **Publishing access** to *Require two-factor
+On the same page set **Publishing access** to *Require two-factor
 authentication and disallow tokens*.
 
-Then delete every access token that could publish this package:
+Then delete every credential that could still publish:
+<https://www.npmjs.com/settings/~/tokens> → revoke any **Automation** or
+**Granular** token with publish rights, especially any with *bypass 2FA*
+enabled. Remove the `//registry.npmjs.org/:_authToken=...` line from `~/.npmrc`
+on every machine once you stop releasing by hand.
 
-1. <https://www.npmjs.com/settings/~/tokens> — revoke any **Automation** or
-   **Granular** token with publish rights. Check specifically for tokens with
-   *bypass 2FA* enabled; those defeat the point.
-2. Remove the `//registry.npmjs.org/:_authToken=...` line from `~/.npmrc` on
-   every machine that has one, once you no longer intend to publish by hand.
-   (The CI workflow already refuses to run if it finds an `.npmrc` or an
-   `NODE_AUTH_TOKEN`/`NPM_TOKEN`, so a stray credential fails the release
-   rather than silently taking precedence.)
+Skipping this leaves the old door open — the OIDC path being locked down says
+nothing about a token that is still live. Verify the reduction is real:
 
-Control that the reduction is real: after revoking, `npm publish` from a local
-machine must fail. If it still succeeds, a credential is still live.
+```sh
+npm publish --dry-run --access public   # a plain publish must now fail
+```
 
-### 3. Optionally gate releases on a reviewer
+### 3. Optionally gate staging on a reviewer
 
 Create an environment named `npm-publish` in *Settings → Environments* and add
-required reviewers. The workflow already references it, so no edit is needed.
+required reviewers. The workflow already references it; no edit is needed.
 
 ## Cutting a release
 
 ```sh
-# on main, with branch protection satisfied
+# on main
 npm version patch --no-git-tag-version   # or minor / major
 git commit -am "Release v0.1.1"
 git tag v0.1.1
 git push --follow-tags
 ```
 
-Then **Actions → Publish to npm → Run workflow**, choose the dist-tag, and type
-the version to confirm.
+Then **Actions → Stage release → Run workflow**, pick the dist-tag, and type the
+version to confirm.
 
 The workflow refuses to run when:
 
 - the typed confirmation does not match `package.json`
 - `npm run check` fails — `lib/client.js` does not match `src/client.js`, or the
   envelope, stylesheet, settings row, or host half is broken
-- the version is already on the registry
+- the version is already published **or already staged**
 - you asked for `latest` without a `v<version>` tag pointing at exactly the
   commit being released
 
-## Local publishing
+It also deletes any `.npmrc` and unsets `NODE_AUTH_TOKEN`/`NPM_TOKEN` first, so
+a stray credential fails closed instead of quietly overriding the OIDC exchange.
 
-Still possible, and it still runs `npm run check` first via `prepublishOnly`.
-It requires an interactive `npm publish` with your 2FA one-time password, which
-is the point — there is no token to make it unattended.
+### Approving
+
+```sh
+npm run release -- list                  # find the stage-id
+npm run release -- view <stage-id>       # inspect before trusting it
+npm run release -- approve <stage-id>    # publishes; requires your 2FA
+npm run release -- reject <stage-id>     # discard
+```
+
+The helper delegates to `npx npm@12` because `npm stage` needs npm ≥ 11.6 (12
+for the current subcommands) and Node 22.22 / 24.15 / 26+, which the local Node
+may not satisfy. `approve` is the only step that publishes, and npm demands your
+2FA there.
+
+Inspect the staged tarball before approving a release you did not build
+yourself — `npm run release -- download <stage-id>` fetches it. That is the
+whole value of the gate: the approval is only meaningful if the artifact is
+actually looked at.
 
 ## Verifying a published release
 
@@ -119,16 +152,18 @@ is the point — there is no token to make it unattended.
 npm view @citisen/dsh-font --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);const v=j['dist-tags'].latest;console.log(v, j.versions[v].dist.integrity);console.log(j.versions[v].dist.attestations)})"
 ```
 
-For an end-to-end check, install into a scratch profile and run the composition
-verifier against that profile:
+For an end-to-end check, install into a scratch profile and verify — composition
+first, then the shipped code itself:
 
 ```sh
 dsh plugin --profile scratch add @citisen/dsh-font
 node scripts/verify-profile.mjs scratch
+# both halves of the PUBLISHED copy, not the working tree
+node scripts/verify-host.mjs   "$DSH_HOME/profiles/scratch/node_modules/@citisen/dsh-font/lib/index.js"
+node scripts/verify-client.mjs "$DSH_HOME/profiles/scratch/node_modules/@citisen/dsh-font/lib/client.js"
 ```
 
-Note that both halves of a *published* artifact should be verified, not just
-composed — the profile verifier proves the loader sees the row, and pointing
-`verify-host.mjs` / `verify-client.mjs` at the installed `lib/index.js` and
-`lib/client.js` proves the shipped code actually runs. A `files` entry missing
-from `package.json` is invisible locally and fatal remotely.
+A `files` entry missing from `package.json` is invisible locally and fatal
+remotely, so a published artifact has to be exercised from where it was
+installed — and note that importing through a profile's directory junction
+resolves to the junction's real path, which is why the explicit paths matter.
