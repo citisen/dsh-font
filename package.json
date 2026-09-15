@@ -1,0 +1,52 @@
+{
+  "name": "dsh-font",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DeepSeek Harness profile bundle: custom Web GUI fonts (UI family, code family, and font sizes)",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/j-sen/dsh-font.git"
+  },
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-theme"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build-client.mjs",
+    "watch": "node scripts/build-client.mjs --watch",
+    "check": "node scripts/build-client.mjs --check && node scripts/verify-host.mjs && node scripts/verify-client.mjs",
+    "verify": "node scripts/verify-host.mjs && node scripts/verify-client.mjs"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "theme",
+    "font"
+  ]
+}
