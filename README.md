@@ -218,8 +218,9 @@ convenience rather than a requirement.
 
 Releases are staged by GitHub Actions over npm trusted publishing and then
 approved by a maintainer, so no `NPM_TOKEN` exists in this repository and none
-should ever be added. See [PUBLISHING.md](PUBLISHING.md) for the one-time npm
-setup, what this does and does not protect against, and the release steps.
+should ever be added. [RELEASING.md](RELEASING.md) is the step-by-step runbook;
+[PUBLISHING.md](PUBLISHING.md) covers the one-time npm setup and what the
+arrangement does and does not protect against.
 
 ## Package layout
 
@@ -231,7 +232,8 @@ setup, what this does and does not protect against, and the release steps.
 | `cordis.patch.yml` | The profile layer this bundle contributes. |
 | `scripts/` | Build and verification scripts. |
 | `.github/workflows/stage.yml` | The CI half of the only publishing path. |
-| `PUBLISHING.md` | Release and trusted-publishing setup. |
+| `PUBLISHING.md` | Trusted-publishing setup, and what it does not protect against. |
+| `RELEASING.md` | The runbook for shipping a change. |
 | `package.json` | Declares `dsh.bundle` (profile layer) and `dsh.client` (browser roster entry). |
 
 ## Known limitations
