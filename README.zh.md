@@ -120,7 +120,8 @@ Node 半边响应 `webserver/index-inject`，注入一段内联 `<script>`，在
 
 ```sh
 npm run build     # src/client.js -> lib/client.js
-npm run check     # 检查 lib/client.js 是否过期，并跑两个校验脚本
+npm run check     # 发布闸门：产物同步 + host/client 校验
+npm run check:all # 再加上 profile 组合校验（需要本机有 dsh）
 npm run verify    # 只跑校验脚本
 npm run watch     # 保存即重建，配合 dsh-client-hmr
 ```
@@ -128,6 +129,8 @@ npm run watch     # 保存即重建，配合 dsh-client-hmr
 浏览器半边的唯一真源是 `src/client.js`。它为了可读性写成 ES module，但 DSH 的客户端 bundle 是**传统脚本（classic script）**，只允许通过 `window.__ModuleLoader__` 注册一个惰性 CommonJS 工厂——因此 `scripts/build-client.mjs` 负责套上这层外壳，并把静态 import 改写成 `require` 调用。这个转换刻意做得很窄，遇到无法改写的写法会直接让构建失败，因为没有打包器能替你发现问题。
 
 浏览器半边只允许请求 shell 注入模块表的那九个模块（`react`、`react/jsx-runtime`、`react-dom`、`react-dom/client`、`@deepseek-ai/cordis`、`@deepseek-ai/dsh-client-store`、`@deepseek-ai/dsh-client-ui-slots`、`@deepseek-ai/dsh-client-ui-primitives`、`@deepseek-ai/dsh-client-ui-dockkit`）；其它模块必须写进 `dsh.client.external` 并作为独立的图节点发布。构建会强制检查这一点。
+
+`verify-profile.mjs` 需要本机有 dsh 安装和已初始化的 profile，所以在两者都不存在时会**跳过**（exit 0）——干净的 CI runner 上没有 dsh。设 `DSH_REQUIRE=1` 可以把「跳过」变成失败。
 
 要在运行中的宿主上迭代浏览器半边，开一个 watcher，让 `dsh-client-hmr` 热替换插件——它每 500 ms 轮询一次客户端 bundle，因此保存后的重建无需刷新页面即可生效：
 
@@ -141,15 +144,21 @@ dsh --profile web
 
 刷新页面总能拿到新组合的图，所以 watcher 只是便利，不是必需。
 
+### 发布
+
+发布**只**由 GitHub Actions 通过 npm trusted publishing 完成；本仓库里没有 `NPM_TOKEN`，也不应该出现。一次性配置、这套机制能防什么与不能防什么、以及发布步骤都写在 [PUBLISHING.md](PUBLISHING.md)。
+
 ## 包结构
 
 | 路径 | 作用 |
 | --- | --- |
 | `lib/index.js` | Node 半边：设置命名空间、首屏绘制前的注入。由 loader 加载。 |
-| `lib/client.js` | 浏览器半边，**由 `src/client.js` 生成**。由 `/plugins/dsh-font/client.js` 提供。 |
+| `lib/client.js` | 浏览器半边，**由 `src/client.js` 生成**。由 `/plugins/@citisen/dsh-font/client.js` 提供。 |
 | `src/client.js` | 浏览器半边源码。 |
 | `cordis.patch.yml` | 本 bundle 贡献的 profile 层。 |
 | `scripts/` | 构建与校验脚本。 |
+| `.github/workflows/publish.yml` | 唯一的发布路径。 |
+| `PUBLISHING.md` | 发布与 trusted publishing 配置。 |
 | `package.json` | 声明 `dsh.bundle`（profile 层）与 `dsh.client`（浏览器节点）。 |
 
 ## 已知限制

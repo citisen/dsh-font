@@ -1,0 +1,136 @@
+# Publishes @citisen/dsh-font to npm — the ONLY publishing path once trusted
+# publishing is configured on npm.
+#
+# There is deliberately no `NPM_TOKEN` anywhere in this file. npm trusts this
+# repository and this workflow file via GitHub's OIDC identity, so no
+# long-lived credential exists to steal, leak, or forget to rotate. That trust
+# is configured at
+#   https://www.npmjs.com/package/@citisen/dsh-font/access
+# and is pinned to the exact workflow filename below; renaming or moving this
+# file breaks publishing until npm is updated to match.
+#
+# Trigger is manual on purpose: publishing a release should be a deliberate
+# act, not a side effect of a merge.
+#
+# To release:
+#   1. bump "version" in package.json and commit it
+#   2. Actions -> Publish to npm -> Run workflow
+# It refuses to publish when the version is already on the registry, and
+# refuses to publish a "latest" release from a tag that does not point at the
+# exact commit being released.
+
+name: Publish to npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      dist-tag:
+        description: npm dist-tag to publish under
+        type: choice
+        options:
+          - latest
+          - next
+          - alpha
+        default: latest
+      confirm:
+        description: Type the version in package.json to confirm (e.g. 0.1.1)
+        required: true
+        type: string
+
+permissions:
+  # Required for the OIDC token npm exchanges for a short-lived publish grant.
+  id-token: write
+  contents: read
+
+concurrency:
+  # One publish at a time; never cancel one mid-flight, which could leave the
+  # registry in a state no local checkout knows about.
+  group: publish-npm
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # A protected environment lets you require reviewers before a release even
+    # starts. Create one named exactly this in repo Settings -> Environments,
+    # or delete this line to skip the gate.
+    environment: npm-publish
+    steps:
+      - name: Check out the exact commit being released
+        uses: actions/checkout@v4
+        with:
+          # Full history, so the annotated-tag ancestry check below can run.
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # Node 22 ships npm >= 10.9, the first version that can exchange an
+          # OIDC token for a publish grant.
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Read and confirm the version
+        id: version
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "package.json version: $version"
+          if [ "$CONFIRM" != "$version" ]; then
+            echo "::error::confirmation '$CONFIRM' does not match package.json version '$version'"
+            exit 1
+          fi
+
+      - name: Verify the shipped artifacts
+        run: |
+          set -euo pipefail
+          # Fails if lib/client.js does not match src/client.js, then exercises
+          # the envelope, the stylesheet, the settings row, and the host half.
+          # This is the same gate a local `npm publish` runs.
+          npm run check
+
+      - name: Refuse to republish an existing version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if npm view "@citisen/dsh-font@$VERSION" version >/dev/null 2>&1; then
+            echo "::error::@citisen/dsh-font@$VERSION is already published — bump package.json"
+            exit 1
+          fi
+          echo "@citisen/dsh-font@$VERSION is free"
+
+      - name: Require a tag for a latest release
+        if: inputs.dist-tag == 'latest'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # `--points-at` matches a tag on this exact commit, so a tag left on
+          # an older commit cannot be used to release something newer.
+          if ! git tag --points-at HEAD | grep -qx "v$VERSION"; then
+            echo "::error::no tag v$VERSION on $GITHUB_SHA — tag the release commit first"
+            exit 1
+          fi
+
+      - name: Drop any registry credential from the runner
+        run: |
+          set -euo pipefail
+          # Fail closed if someone later adds a token: with trusted publishing
+          # the OIDC exchange is the only intended path, and a stray token would
+          # silently take precedence.
+          rm -f "$HOME/.npmrc" .npmrc
+          unset NODE_AUTH_TOKEN NPM_TOKEN
+          npm config set registry https://registry.npmjs.org/
+
+      - name: Publish
+        env:
+          DIST_TAG: ${{ inputs.dist-tag }}
+        run: |
+          set -euo pipefail
+          # No --provenance: npm attaches provenance automatically for a
+          # trusted publish.
+          npm publish --access public --tag "$DIST_TAG"

@@ -174,9 +174,10 @@ when the settings provider is absent.
 
 ```sh
 npm run build     # src/client.js -> lib/client.js
-npm run check     # fail if lib/client.js is stale
-node scripts/verify-host.mjs     # host half: schema, bootstrap, injection row
-node scripts/verify-client.mjs   # client half: envelope, sheet, stamping, row
+npm run check     # the release gate: bundle in sync, host and client verified
+npm run check:all # adds the profile-composition check (needs a local dsh)
+npm run verify    # just the host and client verifiers
+npm run watch     # rebuild on save, for dsh-client-hmr
 ```
 
 `src/client.js` is the single source of truth for the browser half. It is
@@ -194,6 +195,10 @@ its module table (`react`, `react/jsx-runtime`, `react-dom`,
 `@deepseek-ai/dsh-client-ui-dockkit`); anything else must be declared in
 `dsh.client.external` and shipped as its own graph row. The build enforces this.
 
+`verify-profile.mjs` needs a dsh installation and an initialized profile, so it
+**skips** (exit 0) when neither is present — a clean CI runner has no dsh. Set
+`DSH_REQUIRE=1` to turn that skip into a failure.
+
 To iterate on the browser half against a running host, run the watcher and let
 `dsh-client-hmr` swap the plugin in — it stat-polls client bundles every 500 ms,
 so a saved rebuild reaches the open page without a refresh:
@@ -209,15 +214,24 @@ dsh --profile web
 A page refresh always picks up a newly composed graph, so the watcher is a
 convenience rather than a requirement.
 
+### Releasing
+
+Releases are published by GitHub Actions over npm trusted publishing; there is
+no `NPM_TOKEN` in this repository and there should never be one. See
+[PUBLISHING.md](PUBLISHING.md) for the one-time npm setup, what that does and
+does not protect against, and the release steps.
+
 ## Package layout
 
 | Path | Role |
 | --- | --- |
 | `lib/index.js` | Host half: settings namespace, pre-paint injection. Loaded by the loader. |
-| `lib/client.js` | Browser half, **generated** from `src/client.js`. Served at `/plugins/dsh-font/client.js`. |
+| `lib/client.js` | Browser half, **generated** from `src/client.js`. Served at `/plugins/@citisen/dsh-font/client.js`. |
 | `src/client.js` | Browser-half source. |
 | `cordis.patch.yml` | The profile layer this bundle contributes. |
 | `scripts/` | Build and verification scripts. |
+| `.github/workflows/publish.yml` | The only publishing path. |
+| `PUBLISHING.md` | Release and trusted-publishing setup. |
 | `package.json` | Declares `dsh.bundle` (profile layer) and `dsh.client` (browser roster entry). |
 
 ## Known limitations
