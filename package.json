@@ -75,5 +75,8 @@
     "theme",
     "web-ui",
     "web-gui"
-  ]
+  ],
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.2"
+  }
 }

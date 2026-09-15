@@ -82,6 +82,16 @@ jobs:
           npm install --global npm@12
           npm --version
 
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          # The host half imports @deepseek-ai/schemastery as a real runtime
+          # dependency. dsh supplies it to a plugin at runtime, but the
+          # verification steps below import the host half directly, so it must
+          # be installed here too -- without this the gate dies with
+          # ERR_MODULE_NOT_FOUND and no release can ever stage.
+          npm ci
+
       - name: Read and confirm the version
         id: version
         env:
