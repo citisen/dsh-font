@@ -6,6 +6,8 @@
 
 这是一个第三方 [dsh](https://github.com/deepseek-ai/deepseek-harness) profile bundle（插件包）。它是一个「双面」包：Node 半边负责持久化的设置命名空间与首屏绘制前的样式注入，浏览器半边负责实际绘制并注册设置项。
 
+需要 dsh `0.1.5-rc.1` 或更新的 `0.1.5-rc.x`；它用到 `settings.general.item` 插槽、`settingsScope` 服务以及 `ctx.theme.overrideTokens`，这些在 `latest` 与 `next` 两条发布通道里都已具备。
+
 ## 功能
 
 在 *设置 → 通用* 中新增一个 **字体** 行，包含五个控件：
@@ -25,13 +27,13 @@
 ## 安装
 
 ```sh
-dsh plugin --profile web add github:j-sen/dsh-font
+dsh plugin --profile web add @citisen/dsh-font
 ```
 
-或者从本地目录安装：
+直接从 GitHub 安装（同一个包，不走 registry）：
 
 ```sh
-dsh plugin --profile web add /path/to/dsh-font
+dsh plugin --profile web add github:citisen/dsh-font
 ```
 
 然后重启 Web 界面：
@@ -41,6 +43,21 @@ dsh --profile web
 ```
 
 `dsh plugin` 会在 profile 目录里转发给 pnpm，然后对 `dsh.profile.bundles` 做一次对账：由于本包声明了 `dsh.bundle`，安装时会自动把它追加为一个 profile 层，无需手工修改 `cordis.patch.yml`。
+
+### 从本地目录安装
+
+在 Windows 上，如果 profile 和代码目录位于**不同盘符**，`dsh plugin --profile web add <路径>` 不可靠——pnpm 会把跨盘符的目录链接解析成一个不存在的路径，随后对账会认为该包没有声明 `dsh.bundle`，于是不把它写进 `bundles`。这时请自己建立链接：
+
+```sh
+cd "$DSH_HOME/profiles/web"
+pnpm add "D:/path/to/dsh-font"          # 写入依赖
+# pnpm 建立的链接指向 <profile>/D:/path/to/dsh-font，该路径不存在，需要修复：
+cmd /c rmdir node_modules\dsh-font
+cmd /c mklink /J node_modules\dsh-font D:\path\to\dsh-font
+# 再手工把 "dsh-font" 加进 package.json 的 dsh.profile.bundles
+```
+
+用 `node scripts/verify-profile.mjs` 校验结果；只要这一行没进最终的 entry 列表，它就会直接报错。
 
 ## 实现原理
 

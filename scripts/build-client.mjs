@@ -25,8 +25,13 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const sourcePath = join(root, 'src', 'client.js')
 const outputPath = join(root, 'lib', 'client.js')
 
-/** The package name; must equal the id the shell's module table keys on. */
-const PACKAGE_NAME = 'dsh-font'
+/**
+ * The bundle id the shell's module table keys on. It must equal the package
+ * name: `dsh-client-modules` resolves a roster row by the loader entry name and
+ * matches it against the id the bundle registers. Read from package.json rather
+ * than duplicated here, so a rename cannot desynchronize the two.
+ */
+const PACKAGE_NAME = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).name
 
 /**
  * The names the envelope exports from the compiled factory. The first entry is
@@ -138,6 +143,34 @@ function qualifyImports(body, { namedBindings, defaultBindings }) {
 }
 
 /**
+ * The plugin-identity declaration the template carries. The build substitutes
+ * the real package name, which is the value the theme registry pins an override
+ * layer to and the roster keys a bundle on. Keeping it single-sourced in
+ * package.json means a rename cannot desynchronize the bundle id, the theme
+ * layer, and the loader row.
+ */
+const IDENTITY_PATTERN = /\/\* dsh:plugin-id \*\/\s*(['"])[^'"]*\1/
+
+/** The CSS namespace prefix. Purely cosmetic; never compared against npm. */
+const STYLE_PREFIX = 'dsh-font'
+
+/**
+ * Substitute the template's identity declaration with the real package name.
+ * @param body - source after import rewriting.
+ * @returns the source with the single declaration substituted.
+ * @throws {Error} when the declaration is missing or repeated.
+ */
+function substituteIdentity(body) {
+  const matches = body.match(new RegExp(IDENTITY_PATTERN.source, 'g')) ?? []
+  if (matches.length !== 1) {
+    throw new Error(
+      `build-client: src/client.js must contain exactly one /* dsh:plugin-id */ identity declaration (found ${String(matches.length)})`,
+    )
+  }
+  return body.replace(IDENTITY_PATTERN, JSON.stringify(PACKAGE_NAME))
+}
+
+/**
  * Strip the template's `export` keywords. The envelope re-exports
  * {@link ENVELOPE_EXPORTS} from the factory, so each of those only has to be a
  * top-level declaration — exporting it is optional and is removed either way.
@@ -204,7 +237,9 @@ function compile() {
   }
 
   return {
-    bundle: wrap(qualifyImports(stripExports(body), { namedBindings, defaultBindings })),
+    bundle: wrap(
+      substituteIdentity(qualifyImports(stripExports(body), { namedBindings, defaultBindings })),
+    ),
     requested,
   }
 }

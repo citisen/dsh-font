@@ -21,6 +21,9 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const bundlePath = resolve(process.argv[2] ?? join(root, 'lib', 'client.js'))
 const source = readFileSync(bundlePath, 'utf8')
 
+/** The package name, which the bundle id must equal. */
+const PACKAGE_NAME = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).name
+
 /** Minimal React stub: enough for the row component to build a tree. */
 const react = {
   createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
@@ -96,7 +99,7 @@ const requireStub = (specifier) => {
 
 assert.equal(registrations.length, 1, 'the bundle must register exactly one factory')
 const [registration] = registrations
-assert.equal(registration.id, 'dsh-font')
+assert.equal(registration.id, PACKAGE_NAME)
 assert.equal(typeof registration.factory, 'function')
 
 const plugin = registration.factory(requireStub)
@@ -105,6 +108,13 @@ assert.ok(Array.isArray(plugin.inject), 'bundle must export inject as an array')
 assert.deepEqual(plugin.inject, ['slots', 'locale', 'settingsScope'])
 assert.equal(typeof plugin.fontStyleSheet, 'function')
 assert.equal(typeof plugin.applyFonts, 'function')
+
+// The build must have substituted the template's identity placeholder, or the
+// bundle would register the placeholder instead of the real package name.
+assert.ok(
+  !source.includes('dsh:plugin-id'),
+  'the identity placeholder must be substituted at build time',
+)
 
 // ── the stylesheet builder ──────────────────────────────────────────────────
 const section = {
@@ -178,6 +188,18 @@ assert.equal(styleTags.length, 1, 'applyFonts must create one stylesheet')
 assert.equal(styleTags[0].tagName, 'style')
 assert.equal(styleTags[0].id, 'dsh-font/variables')
 assert.equal(styleTags[0].dataset.plugin, 'dsh-font')
+
+// The host half looks this element up by the same id when it repaints the
+// pre-paint row; a drift between the two halves would silently stack two
+// stylesheets with the later one winning.
+const hostSource = readFileSync(join(root, 'lib', 'index.js'), 'utf8')
+const hostStyleId = /const FONT_STYLE_ID = '([^']+)'/.exec(hostSource)?.[1]
+assert.equal(
+  hostStyleId,
+  styleTags[0].id,
+  'lib/index.js FONT_STYLE_ID must equal the client half stylesheet id',
+)
+
 assert.match(styleTags[0].textContent, /\.dsh-font-size-14\{/)
 assert.equal(rootProperties.get('--dsw-font-family'), 'Inter, sans-serif')
 assert.equal(rootProperties.get('--ds-font-family-code'), '"JetBrains Mono", monospace')
@@ -320,7 +342,7 @@ const ctx = {
 plugin.apply(ctx)
 
 assert.equal(themeOverrides.length, 1, 'the families must be stacked onto the theme')
-assert.equal(themeOverrides[0].source, 'dsh-font')
+assert.equal(themeOverrides[0].source, PACKAGE_NAME)
 assert.deepEqual(Object.keys(themeOverrides[0].tokens).sort(), ['--ds-font-family-code', '--dsw-font-family'])
 assert.equal(themeOverrides[0].tokens['--dsw-font-family'].light, section.uiFontFamily)
 assert.equal(themeOverrides[0].tokens['--dsw-font-family'].dark, section.uiFontFamily)

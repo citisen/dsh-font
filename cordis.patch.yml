@@ -9,11 +9,12 @@
 # roster is keyed on: `@deepseek-ai/dsh-client-modules` scans the live loader
 # entries for packages declaring `dsh.client`, finds this one, and serves
 # `exports["./client"]` (`lib/client.js`) into the Web GUI at
-# `/plugins/dsh-font/client.js`.
+# `/plugins/@citisen/dsh-font/client.js`.
 #
-# The id must stay stable: remove or disable a row by id from a later layer,
-# and never mount this package through two loader entries.
+# The quote around `name` is required: a bare YAML scalar may not start with
+# `@`. The id is deliberately short and stable — remove or disable a row by id
+# from a later layer, and never mount this package through two loader entries.
 
 - insert:
     - id: font
-      name: 'dsh-font'
+      name: '@citisen/dsh-font'

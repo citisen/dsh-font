@@ -1,13 +1,17 @@
 {
-  "name": "dsh-font",
+  "name": "@citisen/dsh-font",
   "version": "0.1.0",
-  "private": true,
-  "description": "DeepSeek Harness profile bundle: custom Web GUI fonts (UI family, code family, and font sizes)",
+  "description": "DeepSeek Harness plugin: customize the Web GUI fonts (interface family, code family, and three font-size axes) from Settings",
   "type": "module",
   "license": "MIT",
+  "author": "citisen",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/j-sen/dsh-font.git"
+    "url": "git+https://github.com/citisen/dsh-font.git"
+  },
+  "homepage": "https://github.com/citisen/dsh-font#readme",
+  "bugs": {
+    "url": "https://github.com/citisen/dsh-font/issues"
   },
   "main": "lib/index.js",
   "exports": {
@@ -20,10 +24,15 @@
     "lib/index.js",
     "lib/client.js",
     "cordis.patch.yml",
+    "src",
+    "scripts",
     "README.md",
     "README.zh.md",
     "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -39,14 +48,29 @@
   "scripts": {
     "build": "node scripts/build-client.mjs",
     "watch": "node scripts/build-client.mjs --watch",
-    "check": "node scripts/build-client.mjs --check && node scripts/verify-host.mjs && node scripts/verify-client.mjs",
-    "verify": "node scripts/verify-host.mjs && node scripts/verify-client.mjs"
+    "verify": "node scripts/verify-host.mjs && node scripts/verify-client.mjs",
+    "check": "node scripts/build-client.mjs --check && npm run verify"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
   },
   "keywords": [
     "deepseek-harness",
+    "deepseek",
     "dsh",
     "dsh-plugin",
+    "dsh-bundle",
+    "font",
+    "fonts",
+    "font-family",
+    "font-size",
     "theme",
-    "font"
+    "web-ui",
+    "web-gui"
   ]
 }

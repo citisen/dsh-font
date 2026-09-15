@@ -11,42 +11,55 @@
  *   node scripts/verify-profile.mjs [profile-name]
  */
 
-import { pathToFileURL } from 'node:url'
+import { readFileSync, statSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
-const profileName = process.argv[2] ?? 'web'
+/** The dsh installation whose own loader and composition rules this check uses. */
 const DSH_ROOT =
   process.env.DSH_CHECKOUT ??
-  'C:/Users/Administrator/AppData/Local/npm-cache/_npx/1e7f6d9597241db0/node_modules/@deepseek-ai'
+  join(
+    process.env.LOCALAPPDATA ?? 'C:/Users/Administrator/AppData/Local',
+    'npm-cache/_npx/1e7f6d9597241db0/node_modules/@deepseek-ai',
+  )
 const INSTALL_ANCHOR = `${DSH_ROOT}/dsh/package.json`
 
-const { loadProfile } = await import(pathToFileURL(`${DSH_ROOT}/dsh-app-boot/lib/index.js`).href)
+const profileName = process.argv[2] ?? 'web'
+
+const { loadProfile, composeEntries } = await import(
+  pathToFileURL(`${DSH_ROOT}/dsh-app-boot/lib/index.js`).href
+)
 
 const profile = loadProfile('dsh', profileName, INSTALL_ANCHOR)
+
+/** This plugin's package name, as declared by its own manifest. */
+const OWN_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+const PACKAGE_NAME = JSON.parse(readFileSync(join(OWN_ROOT, 'package.json'), 'utf8')).name
 
 const layers = profile.layers.map((layer) => layer.packageName)
 console.log(`verify-profile: profile "${profileName}" at ${profile.dir}`)
 console.log(`verify-profile: layers = ${layers.join(' -> ')}`)
 
-const index = layers.indexOf('dsh-font')
+const index = layers.indexOf(PACKAGE_NAME)
 if (index === -1) {
   throw new Error(
-    `verify-profile: "dsh-font" is not a profile layer. Add it to dsh.profile.bundles in ${profile.dir}`,
+    `verify-profile: "${PACKAGE_NAME}" is not a profile layer. Add it to dsh.profile.bundles in ${profile.dir} (or install it with \`dsh plugin --profile ${profileName} add ${PACKAGE_NAME}\`)`,
   )
 }
 if (index !== layers.length - 1) {
   console.warn(
-    `verify-profile: warning — dsh-font is layer ${String(index)} of ${String(layers.length - 1)}; later layers override it`,
+    `verify-profile: warning — ${PACKAGE_NAME} is layer ${String(index)} of ${String(layers.length - 1)}; later layers override it`,
   )
 }
 
 const own = profile.layers[index]
-console.log(`verify-profile: dsh-font patch = ${own.patchPath}`)
+console.log(`verify-profile: ${PACKAGE_NAME} patch = ${own.patchPath}`)
 if (own.patches.length === 0) {
-  throw new Error('verify-profile: the dsh-font patch layer contributed no entries')
+  throw new Error(`verify-profile: the ${PACKAGE_NAME} patch layer contributed no entries`)
 }
 
 // The composed entry list is what the loader will actually mount.
-const { composeEntries } = await import(pathToFileURL(`${DSH_ROOT}/dsh-app-boot/lib/index.js`).href)
 const warnings = []
 const entries = composeEntries(
   [...profile.layers.map((layer) => layer.patches), profile.patches],
@@ -58,8 +71,8 @@ if (row === undefined) {
     `verify-profile: the composed entry list has no "font" row; got [${entries.map((entry) => entry.id).join(', ')}]`,
   )
 }
-if (row.name !== 'dsh-font') {
-  throw new Error(`verify-profile: row "font" names "${String(row.name)}", expected "dsh-font"`)
+if (row.name !== PACKAGE_NAME) {
+  throw new Error(`verify-profile: row "font" names "${String(row.name)}", expected "${PACKAGE_NAME}"`)
 }
 if (row.disabled === true) {
   throw new Error('verify-profile: row "font" is disabled')
@@ -75,10 +88,6 @@ console.log(`verify-profile: OK — ${String(entries.length)} composed entries, 
 // by reading each package's `dsh.client` and `exports["./client"]`. Reproduce
 // that resolution here, because a mistake in either field fails only in the
 // browser, as a bare 404 on a combo URL.
-const { readFileSync, statSync } = await import('node:fs')
-const { createRequire } = await import('node:module')
-const { dirname, join } = await import('node:path')
-
 const profileDir = profile.dir
 const require_ = createRequire(join(profileDir, 'package.json'))
 
@@ -86,14 +95,16 @@ let manifestPath
 try {
   // Resolve the way the loader resolves the row: from the profile directory,
   // where pnpm materialized the dependency.
-  manifestPath = require_.resolve('dsh-font/package.json')
+  manifestPath = require_.resolve(`${PACKAGE_NAME}/package.json`)
 } catch (error) {
-  throw new Error(`verify-profile: cannot resolve dsh-font/package.json from ${profileDir}: ${String(error)}`)
+  throw new Error(
+    `verify-profile: cannot resolve ${PACKAGE_NAME}/package.json from ${profileDir}: ${String(error)}`,
+  )
 }
 
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
 const decl = manifest.dsh?.client
-if (decl === undefined) throw new Error('verify-profile: dsh-font declares no dsh.client')
+if (decl === undefined) throw new Error(`verify-profile: ${PACKAGE_NAME} declares no dsh.client`)
 if (decl.platform !== 'web') {
   throw new Error(`verify-profile: dsh.client.platform is "${String(decl.platform)}", expected "web"`)
 }

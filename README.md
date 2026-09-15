@@ -10,6 +10,10 @@ profile bundle. It ships as one dual-face package: a Node half that owns a
 durable settings namespace and a pre-paint style row, and a browser half that
 paints the result and registers the Settings row.
 
+Requires dsh `0.1.5-rc.1` or a later `0.1.5-rc.x`; it uses the `settings.general.item`
+slot, the `settingsScope` service, and `ctx.theme.overrideTokens`, all of which
+are present in the `latest` and `next` release channels.
+
 ## What it adds
 
 A **Fonts** row in *Settings → General*, with five controls:
@@ -34,13 +38,13 @@ without changing how much message text fits on screen, and vice versa.
 ## Install
 
 ```sh
-dsh plugin --profile web add github:j-sen/dsh-font
+dsh plugin --profile web add @citisen/dsh-font
 ```
 
-Or from a local checkout:
+Straight from GitHub instead of npm (identical package, no registry involved):
 
 ```sh
-dsh plugin --profile web add /path/to/dsh-font
+dsh plugin --profile web add github:citisen/dsh-font
 ```
 
 Then restart the Web surface:
@@ -53,6 +57,27 @@ dsh --profile web
 `dsh.profile.bundles`: because this package declares `dsh.bundle`, the install
 appends it as a profile layer automatically. Nothing has to be hand-edited in
 `cordis.patch.yml`.
+
+### Installing from a local checkout
+
+`dsh plugin --profile web add <path>` is unreliable on Windows when the profile
+and the checkout are on **different drives** — pnpm resolves the cross-drive
+directory link to a nonexistent path, and the reconciliation then concludes the
+package declares no `dsh.bundle` and leaves it out of `bundles`. Link it
+yourself instead:
+
+```sh
+cd "$DSH_HOME/profiles/web"
+pnpm add "D:/path/to/dsh-font"          # writes the dependency
+# then repair the link pnpm created, which points at
+#   <profile>/D:/path/to/dsh-font  -- a path that does not exist
+rm -rf node_modules/dsh-font
+cmd /c mklink /J node_modules\dsh-font D:\path\to\dsh-font   # Windows
+# and add "dsh-font" to dsh.profile.bundles in package.json by hand
+```
+
+Verify the result with `node scripts/verify-profile.mjs`; it fails loudly if the
+row never made it into the composed entry list.
 
 ## How it works
 

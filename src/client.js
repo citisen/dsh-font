@@ -36,10 +36,20 @@ import {
 const FONT_SETTINGS_NAMESPACE = 'ui-font'
 /** Locale namespace owning this feature's settings-row copy. */
 const SETTINGS_LOCALE_NAMESPACE = 'settings.font'
-/** Id of the single stylesheet this plugin owns. */
-const FONT_STYLE_ID = 'dsh-font/variables'
-/** Plugin id, used as the theme override layer source and the CSS tag owner. */
-const PLUGIN_ID = 'dsh-font'
+/** Cosmetic namespace for this plugin's CSS classes and tags. */
+const STYLE_PREFIX = 'dsh-font'
+/**
+ * Id of the single stylesheet this plugin owns. The host half's pre-paint
+ * bootstrap looks the same element up by this id, so the two must agree;
+ * `scripts/verify-client.mjs` asserts that they do.
+ */
+const FONT_STYLE_ID = `${STYLE_PREFIX}/variables`
+/**
+ * The plugin's identity in the theme registry, substituted with the real
+ * package name by `scripts/build-client.mjs`. The theme pins one override layer
+ * per source, so this must equal the package the roster mounted.
+ */
+const PLUGIN_ID = /* dsh:plugin-id */ 'dsh-font'
 
 /** Field names — must match the host schema in `lib/index.js`. */
 const UI_FONT_FAMILY_FIELD = 'uiFontFamily'
@@ -246,7 +256,7 @@ function applyFonts(section) {
   if (tag === null) {
     tag = document.createElement('style')
     tag.id = FONT_STYLE_ID
-    tag.dataset.plugin = PLUGIN_ID
+    tag.dataset.plugin = STYLE_PREFIX
     const parent = document.head || document.documentElement
     parent.appendChild(tag)
   }
@@ -422,8 +432,8 @@ function installRowStyles(ctx) {
   if (typeof document === 'undefined') return
   ctx.effect(() => {
     const tag = document.createElement('style')
-    tag.dataset.plugin = PLUGIN_ID
-    tag.dataset.pluginCss = `${PLUGIN_ID}/row.css`
+    tag.dataset.plugin = STYLE_PREFIX
+    tag.dataset.pluginCss = `${STYLE_PREFIX}/row.css`
     tag.textContent = ROW_CSS
     document.head.appendChild(tag)
     return () => {
