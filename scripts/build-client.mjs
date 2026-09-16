@@ -38,7 +38,18 @@ const PACKAGE_NAME = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')
  * what the loader consumes; the rest exist so the verifier can unit-test the
  * pure builders without re-parsing the source.
  */
-const ENVELOPE_EXPORTS = ['apply', 'inject', 'fontStyleSheet', 'applyFonts']
+const ENVELOPE_EXPORTS = [
+  'apply',
+  'inject',
+  'fontStyleSheet',
+  'applyFonts',
+  'parseFamilyList',
+  'serializeFamilyList',
+  'rankFamilyMatches',
+  'comboboxView',
+  'FamilyStack',
+  'FamilyChip',
+]
 
 /**
  * `import [default][, { named }] from 'spec'`, with no nested braces.

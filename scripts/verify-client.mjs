@@ -24,13 +24,52 @@ const source = readFileSync(bundlePath, 'utf8')
 /** The package name, which the bundle id must equal. */
 const PACKAGE_NAME = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).name
 
-/** Minimal React stub: enough for the row component to build a tree. */
+/**
+ * Minimal React stub: enough to build a tree, plus enough hook state to drive
+ * interactions.
+ *
+ * Only ONE component instance may hold live hook state at a time, because the
+ * slots are keyed by `useState` call order. `mount()` therefore creates that
+ * instance: it returns a `render(props)` that seeds fresh slots on the first
+ * call and reuses them afterwards, so a state write followed by a re-render
+ * behaves like the real thing. A previous instance's slots are discarded, which
+ * is what keeps one harness from clobbering another's.
+ *
+ * `useEffect` is deliberately inert: nothing under test depends on an effect
+ * having run, and the components only use effects for work the tests drive
+ * explicitly.
+ *
+ * @returns `{ render, state }`.
+ */
+function mount() {
+  let slots
+  const state = () => slots
+  const render = (component, props) => {
+    if (slots === undefined) slots = [] // first render of this instance
+    react.__hookIndex = 0
+    react.__slots = slots
+    return component(props)
+  }
+  return { render, state }
+}
+
 const react = {
   createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
   useCallback: (fn) => fn,
   useEffect: () => undefined,
   useRef: (value) => ({ current: value }),
-  useState: (value) => [value, () => undefined],
+  useState: (value) => {
+    const slots = react.__slots ?? (react.__slots = [])
+    const index = react.__hookIndex ?? 0
+    if (slots.length <= index) slots.push(value)
+    react.__hookIndex = index + 1
+    return [
+      slots[index],
+      (next) => {
+        slots[index] = typeof next === 'function' ? next(slots[index]) : next
+      },
+    ]
+  },
 }
 
 /** A tiny observable store, matching the `@deepseek-ai/dsh-client-store` face. */
@@ -108,6 +147,61 @@ assert.ok(Array.isArray(plugin.inject), 'bundle must export inject as an array')
 assert.deepEqual(plugin.inject, ['slots', 'locale', 'settingsScope'])
 assert.equal(typeof plugin.fontStyleSheet, 'function')
 assert.equal(typeof plugin.applyFonts, 'function')
+assert.equal(typeof plugin.parseFamilyList, 'function')
+assert.equal(typeof plugin.serializeFamilyList, 'function')
+assert.equal(typeof plugin.rankFamilyMatches, 'function')
+
+// ── the family list: parse and serialize ────────────────────────────────────
+// A naive `split(',')` is the obvious implementation and it is wrong: a quoted
+// family may itself contain a comma, and CSS allows that.
+assert.deepEqual(plugin.parseFamilyList('Inter, "PingFang SC", sans-serif'), [
+  'Inter',
+  'PingFang SC',
+  'sans-serif',
+])
+assert.deepEqual(plugin.parseFamilyList('"Foo, Bar", monospace'), ['Foo, Bar', 'monospace'])
+assert.deepEqual(plugin.parseFamilyList("'Single Quoted', serif"), ['Single Quoted', 'serif'])
+assert.deepEqual(plugin.parseFamilyList('  Arial  ,  , Helvetica '), ['Arial', 'Helvetica'])
+assert.deepEqual(plugin.parseFamilyList(''), [])
+assert.deepEqual(plugin.parseFamilyList(undefined), [])
+
+// Serialization quotes only what CSS requires. Quoting a generic family would
+// name a literal font instead of the generic one, which breaks silently.
+assert.equal(
+  plugin.serializeFamilyList(['Inter', 'PingFang SC', 'sans-serif']),
+  'Inter, "PingFang SC", sans-serif',
+)
+assert.equal(plugin.serializeFamilyList(['Foo, Bar', 'monospace']), '"Foo, Bar", monospace')
+assert.equal(
+  plugin.serializeFamilyList(['Segoe UI Variable', 'system-ui']),
+  '"Segoe UI Variable", system-ui',
+)
+
+// Round-tripping must be stable: this property is what lets the plain CSS
+// string stay the stored form with no schema change and no migration.
+for (const value of [
+  'Inter, "PingFang SC", sans-serif',
+  '"SF Mono", "JetBrains Mono", Consolas, monospace',
+  '"Foo, Bar", "Baz, Qux", serif',
+]) {
+  assert.equal(
+    plugin.serializeFamilyList(plugin.parseFamilyList(value)),
+    value,
+    `round-trip changed ${value}`,
+  )
+}
+
+// ── suggestion ranking ──────────────────────────────────────────────────────
+const catalogue = ['Fira Code', 'Fira Sans', 'Inter', 'Inter Tight', 'Roboto Mono', 'monospace']
+assert.deepEqual(plugin.rankFamilyMatches(catalogue, ''), catalogue)
+assert.equal(plugin.rankFamilyMatches(catalogue, 'inter')[0], 'Inter', 'an exact match must lead')
+assert.deepEqual(
+  plugin.rankFamilyMatches(catalogue, 'fira').slice(0, 2),
+  ['Fira Code', 'Fira Sans'],
+  'prefix matches must precede substring matches',
+)
+assert.deepEqual(plugin.rankFamilyMatches(catalogue, 'code'), ['Fira Code'])
+assert.deepEqual(plugin.rankFamilyMatches(catalogue, 'zzz'), [])
 
 // The build must have substituted the template's identity placeholder, or the
 // bundle would register the placeholder instead of the real package name.
@@ -289,6 +383,283 @@ globalThis.document = {
     return node
   },
 }
+
+// ── the family-stack editor ─────────────────────────────────────────────────
+// Drive the real components rather than a re-implementation.
+//
+// The React stub does not recursively render function-valued children, so a
+// `FamilyStack` tree holds its chips as unresolved `<FamilyChip>` elements.
+// The chips are therefore verified at their own level (they are pure), and the
+// stack is verified through them plus its own combobox.
+
+/** Collect every element in a tree, depth-first, flattening array children. */
+function collectElements(node, out = []) {
+  if (node === null || node === undefined) return out
+  if (Array.isArray(node)) {
+    for (const entry of node) collectElements(entry, out)
+    return out
+  }
+  if (typeof node !== 'object') return out
+  out.push(node)
+  const children = Array.isArray(node.children) ? node.children : [node.children]
+  for (const child of children) collectElements(child, out)
+  collectElements(node.props?.children, out)
+  return out
+}
+
+/** Every unresolved `<FamilyChip>` element in a tree, in order. */
+function chipElements(tree) {
+  return collectElements(tree).filter(
+    (element) => typeof element.type === 'function' && element.type.name === 'FamilyChip',
+  )
+}
+
+const CHIP_CALLS = ['Inter', 'Fira Code', 'Fira Sans', 'Roboto', 'sans-serif']
+
+/** Render one chip and capture the callbacks it fires. */
+function renderChip(family, index, count = CHIP_CALLS.length) {
+  const calls = []
+  const tree = plugin.FamilyChip({
+    family,
+    index,
+    count,
+    onMove: (from, to) => calls.push(['move', from, to]),
+    onRemove: (position) => calls.push(['remove', position]),
+    moveEarlier: 'Earlier',
+    moveLater: 'Later',
+    remove: 'Remove',
+  })
+  return {
+    tree,
+    calls,
+    /** Fire the action whose aria-label is `<label>: <family>`. */
+    fire(label) {
+      const button = collectElements(tree).find(
+        (element) =>
+          element.type === 'button' && element.props?.['aria-label'] === `${label}: ${family}`,
+      )
+      assert.ok(button !== undefined, `no "${label}" button on the ${family} chip`)
+      if (button.props.disabled === true) return false
+      button.props.onClick()
+      return true
+    },
+    button(label) {
+      return collectElements(tree).find(
+        (element) =>
+          element.type === 'button' && element.props?.['aria-label'] === `${label}: ${family}`,
+      )
+    },
+  }
+}
+
+// A chip shows its family name and offers all three actions.
+{
+  const chip = renderChip('Fira Code', 1)
+  const labels = collectElements(chip.tree)
+    .filter((element) => element.type === 'button')
+    .map((element) => element.props['aria-label'])
+  assert.deepEqual(labels, ['Earlier: Fira Code', 'Later: Fira Code', 'Remove: Fira Code'])
+}
+
+// Moving and removing report the right positions: off-by-one here would
+// reorder the wrong font, which is the whole failure mode of this control.
+{
+  const chip = renderChip('Fira Code', 1)
+  assert.equal(chip.fire('Earlier'), true)
+  assert.deepEqual(chip.calls.at(-1), ['move', 1, 0])
+  chip.fire('Later')
+  assert.deepEqual(chip.calls.at(-1), ['move', 1, 2])
+  chip.fire('Remove')
+  assert.deepEqual(chip.calls.at(-1), ['remove', 1])
+}
+
+// The first chip cannot move earlier; the last cannot move later.
+{
+  const first = renderChip('Inter', 0)
+  assert.equal(first.button('Earlier').props.disabled, true)
+  assert.equal(first.fire('Earlier'), false)
+  assert.equal(first.calls.length, 0)
+  const last = renderChip('sans-serif', CHIP_CALLS.length - 1)
+  assert.equal(last.button('Later').props.disabled, true)
+  assert.equal(last.fire('Later'), false)
+}
+
+const stackWrites = []
+
+/**
+ * Render the family-stack editor and re-render after each interaction, the way
+ * a state update would.
+ * @param value - the stored CSS font-family string.
+ * @returns the rendered tree plus interaction helpers.
+ */
+function renderStack(value) {
+  let current = value
+  stackWrites.length = 0
+  const families = CHIP_CALLS
+  const instance = mount()
+
+  const render = () =>
+    instance.render(plugin.FamilyStack, {
+      value: current,
+      families,
+      monospace: false,
+      fallback: 'sans-serif',
+      catalogStatus: 'test',
+      add: (next) => {
+        stackWrites.push(next)
+        current = next
+      },
+      addLabel: 'Add font',
+      remove: 'Remove',
+      moveEarlier: 'Earlier',
+      moveLater: 'Later',
+      genericWarning: 'no generic',
+    })
+
+  const helpers = {
+    tree: render(),
+    /**
+     * Drive one chip action through the stack's own wiring, then re-render.
+     * @param label - `Earlier`, `Later`, or `Remove`.
+     * @param family - the chip's family name.
+     */
+    click(label, family) {
+      // Read the wiring off the rendered chip element, so the test cannot
+      // silently diverge from what the component actually passes down.
+      const chipElement = chipElements(helpers.tree).find(
+        (element) => element.props?.family === family,
+      )
+      assert.ok(chipElement !== undefined, `no chip element for ${family}`)
+      assert.equal(
+        renderChip(family, chipElement.props.index).fire(label),
+        true,
+        `"${label}" is not available for ${family}`,
+      )
+      const { index } = chipElement.props
+      if (label === 'Remove') chipElement.props.onRemove(index)
+      else if (label === 'Earlier') chipElement.props.onMove(index, index - 1)
+      else chipElement.props.onMove(index, index + 1)
+      helpers.tree = render()
+      return stackWrites.at(-1)
+    },
+    /** The chips the stack currently holds, in order. */
+    chips() {
+      return chipElements(helpers.tree).map((element) => element.props.family)
+    },
+    /**
+     * Add a family exactly as the combobox's pick handler does, and re-render.
+     * @param family - the family to append.
+     */
+    add(family) {
+      const comboboxElement = collectElements(helpers.tree).find(
+        (element) => typeof element.type === 'function' && element.type.name === 'FamilyCombobox',
+      )
+      assert.ok(comboboxElement !== undefined, 'the stack must render a FamilyCombobox')
+      comboboxElement.props.add(family)
+      helpers.tree = render()
+      return stackWrites.at(-1)
+    },
+  }
+
+  return helpers
+}
+
+// Chips reflect the stored string, in order, with quotes stripped.
+{
+  const stack = renderStack('Inter, "Fira Code", sans-serif')
+  assert.deepEqual(stack.chips(), ['Inter', 'Fira Code', 'sans-serif'])
+}
+
+// Removing a family rewrites the string without it.
+{
+  const stack = renderStack('Inter, "Fira Code", sans-serif')
+  assert.equal(stack.click('Remove', 'Fira Code'), 'Inter, sans-serif')
+  assert.deepEqual(stack.chips(), ['Inter', 'sans-serif'])
+}
+
+// Reordering is the point of the chips: the first installed family wins, so a
+// move must actually rewrite the order.
+{
+  const stack = renderStack('Inter, "Fira Code", sans-serif')
+  assert.equal(stack.click('Earlier', 'Fira Code'), '"Fira Code", Inter, sans-serif')
+  assert.deepEqual(stack.chips(), ['Fira Code', 'Inter', 'sans-serif'])
+}
+{
+  const stack = renderStack('Inter, "Fira Code", sans-serif')
+  assert.equal(stack.click('Later', 'Inter'), '"Fira Code", Inter, sans-serif')
+}
+
+// Typing filters the catalogue; the chosen family appends to the end of the
+// stack, which is what the combobox's pick handler does.
+{
+  const view = plugin.comboboxView(CHIP_CALLS, 'fira', 0)
+  assert.equal(view.visible[0], 'Fira Code')
+  const stack = renderStack('Inter, sans-serif')
+  assert.equal(stack.add(view.visible[0]), 'Inter, sans-serif, "Fira Code"')
+  assert.deepEqual(stack.chips(), ['Inter', 'sans-serif', 'Fira Code'])
+}
+
+// ── the combobox view: the picker's whole decision ──────────────────────────
+// Tested as a table over the pure function rather than through a faked React
+// runtime, so the assertions are about the behaviour and not about the stub.
+{
+  // An empty query browses the whole catalogue.
+  const browse = plugin.comboboxView(CHIP_CALLS, '', 0)
+  assert.deepEqual(browse.visible, CHIP_CALLS)
+  assert.equal(browse.custom, undefined, 'an empty query offers no custom row')
+
+  // Filtering is case-insensitive and ranks prefix matches first.
+  assert.deepEqual(plugin.comboboxView(CHIP_CALLS, 'fira', 0).visible.slice(0, 2), [
+    'Fira Code',
+    'Fira Sans',
+  ])
+  assert.deepEqual(plugin.comboboxView(CHIP_CALLS, 'FIRA', 0).visible.slice(0, 2), [
+    'Fira Code',
+    'Fira Sans',
+  ])
+  // Whitespace is trimmed before matching.
+  assert.equal(plugin.comboboxView(CHIP_CALLS, '  inter  ', 0).visible[0], 'Inter')
+
+  // A typed family that is not in the catalogue gets a custom row, so a font
+  // the probe missed can still be entered.
+  const custom = plugin.comboboxView(CHIP_CALLS, 'My Font', 0)
+  assert.equal(custom.custom, 'My Font')
+
+  // A typed family that IS in the catalogue must not also offer a custom row,
+  // or the same pick would appear twice.
+  assert.equal(plugin.comboboxView(CHIP_CALLS, 'Inter', 0).custom, undefined)
+  assert.equal(plugin.comboboxView(CHIP_CALLS, 'inter', 0).custom, undefined)
+
+  // The highlight is clamped into range, so a catalogue that shrank under the
+  // cursor cannot index past the end and commit the wrong family.
+  assert.equal(plugin.comboboxView(CHIP_CALLS, 'fira', 99).active, 1)
+  assert.equal(plugin.comboboxView(CHIP_CALLS, 'fira', -5).active, 0)
+  assert.equal(plugin.comboboxView(CHIP_CALLS, 'zzzz', 3).active, 0)
+}
+
+// Removing the only family must not write an empty CSS value.
+{
+  const stack = renderStack('Inter')
+  assert.equal(stack.click('Remove', 'Inter'), 'sans-serif')
+}
+
+// A stack with no generic family warns; one with it does not.
+{
+  const stack = renderStack('Inter, "Fira Code"')
+  const warn = collectElements(stack.tree).find(
+    (element) => element.props?.className === 'dsh-font-warn',
+  )
+  assert.ok(warn !== undefined, 'a stack with no generic family must warn')
+}
+{
+  const stack = renderStack('Inter, sans-serif')
+  const warn = collectElements(stack.tree).find(
+    (element) => element.props?.className === 'dsh-font-warn',
+  )
+  assert.equal(warn, undefined, 'a stack ending in a generic family must not warn')
+}
+
+console.log('verify-client: family-stack editor verified')
 
 // ── apply(ctx) end to end ───────────────────────────────────────────────────
 const themeOverrides = []

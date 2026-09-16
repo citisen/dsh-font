@@ -26,14 +26,47 @@ A **Fonts** row in *Settings → General*, with five controls:
 | Conversation text size | Message bodies, headings, and tables | 12 – 20 px |
 | Code text size | Code blocks and inline code | 10 – 20 px |
 
-Both family fields accept free text and offer one-click presets. Every value is
-saved through the host settings document (`$DSH_HOME/settings.yaml`,
-namespace `ui-font`), so settings survive a restart and are shared by every
-browser pointed at the same host.
+Both family fields are **multi-select font stacks**: each chosen family is a chip
+in priority order, with a search box that autocompletes against the fonts
+actually on your machine. Chips can be reordered or removed, and any family name
+can still be typed by hand. Every value is saved through the host settings
+document (`$DSH_HOME/settings.yaml`, namespace `ui-font`), so settings survive a
+restart and are shared by every browser pointed at the same host.
 
 The *Interface text size* and *Conversation text size* axes are independent on
 purpose: bumping the interface makes the surrounding chrome easier to read
 without changing how much message text fits on screen, and vice versa.
+
+### How the font list is discovered
+
+Order matters in a CSS font stack — the first installed family wins — so the
+picker is built around that rather than around a single text field.
+
+Reading the real installed-font list needs the
+[Local Font Access API](https://developer.mozilla.org/en-US/docs/Web/API/Local_Font_Access_API)
+(`queryLocalFonts`), which is **Chromium-only, experimental, and
+permission-gated**; MDN also notes browsers are not obliged to return the
+complete list. So the catalogue is layered:
+
+1. **`queryLocalFonts()`** when the browser offers it — the row then reports
+   *Read from this machine*. The first use shows a permission prompt; declining
+   falls back silently rather than erroring.
+2. **Measurement probing** everywhere else — each candidate family is rendered
+   off-screen and compared against a `monospace` baseline; a different width or
+   height means it is installed. No permission needed, works in every browser,
+   and the row reports *Common fonts detected by probing*. It only sees the
+   curated probe list, so it under-reports by design.
+3. **Always** the curated catalogue plus the generic families, so a font that
+   neither source found can still be typed and added.
+
+The result is cached for the session, and discovery only runs when the row is
+actually rendered — never at startup.
+
+The picker also warns when a stack has **no generic family at the end** (such as
+`sans-serif`), because a missing font then falls back unpredictably. Note that
+quoting is automatic: `Fira Code` is stored as `"Fira Code"` and generic
+keywords are deliberately left unquoted, so `"sans-serif"` can never be written
+by accident.
 
 ## Install
 
