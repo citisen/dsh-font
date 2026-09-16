@@ -47,6 +47,8 @@ const ENVELOPE_EXPORTS = [
   'serializeFamilyList',
   'rankFamilyMatches',
   'comboboxView',
+  'moveItem',
+  'dropTargetIndex',
   'FamilyStack',
   'FamilyChip',
 ]

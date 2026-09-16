@@ -419,6 +419,7 @@ const CHIP_CALLS = ['Inter', 'Fira Code', 'Fira Sans', 'Roboto', 'sans-serif']
 /** Render one chip and capture the callbacks it fires. */
 function renderChip(family, index, count = CHIP_CALLS.length) {
   const calls = []
+  const events = []
   const tree = plugin.FamilyChip({
     family,
     index,
@@ -428,10 +429,15 @@ function renderChip(family, index, count = CHIP_CALLS.length) {
     moveEarlier: 'Earlier',
     moveLater: 'Later',
     remove: 'Remove',
+    onDragStart: (event) => events.push(['dragStart', event]),
+    onDragEnd: () => events.push(['dragEnd']),
+    onDragOver: (event) => events.push(['dragOver', event]),
+    onDrop: (event) => events.push(['drop', event]),
   })
   return {
     tree,
     calls,
+    events,
     /** Fire the action whose aria-label is `<label>: <family>`. */
     fire(label) {
       const button = collectElements(tree).find(
@@ -448,6 +454,10 @@ function renderChip(family, index, count = CHIP_CALLS.length) {
         (element) =>
           element.type === 'button' && element.props?.['aria-label'] === `${label}: ${family}`,
       )
+    },
+    /** The chip's own element (the drop target). */
+    root() {
+      return tree
     },
   }
 }
@@ -484,6 +494,39 @@ function renderChip(family, index, count = CHIP_CALLS.length) {
   assert.equal(last.fire('Later'), false)
 }
 
+// Drag wiring: the arrows are the drag handle and the whole chip is the drop
+// target, so the two halves of a drag are attached where the pointer goes.
+{
+  const chip = renderChip('Fira Code', 1)
+  const earlier = chip.button('Earlier')
+  assert.equal(earlier.props.draggable, true, 'the arrow must be draggable')
+  assert.equal(typeof earlier.props.onDragStart, 'function')
+  assert.equal(typeof earlier.props.onDragEnd, 'function')
+
+  const root = chip.root()
+  assert.equal(typeof root.props.onDragOver, 'function', 'the chip must accept a hover')
+  assert.equal(typeof root.props.onDrop, 'function', 'the chip must accept a drop')
+
+  // The index itself is stamped by the STACK's handler — the chip only
+  // forwards — so that is asserted against the stack below.
+}
+
+// A chip being dragged is marked, so the strip can show it is in flight.
+{
+  const dragging = plugin.FamilyChip({
+    family: 'Inter',
+    index: 0,
+    count: 2,
+    onMove: () => undefined,
+    onRemove: () => undefined,
+    moveEarlier: 'E',
+    moveLater: 'L',
+    remove: 'R',
+    dragging: true,
+  })
+  assert.match(dragging.props.className, /dsh-font-tokenDragging/)
+}
+
 const stackWrites = []
 
 /**
@@ -518,6 +561,11 @@ function renderStack(value) {
 
   const helpers = {
     tree: render(),
+    /** Re-render and remember the result, for state the component holds. */
+    rerender() {
+      helpers.tree = render()
+      return helpers.tree
+    },
     /**
      * Drive one chip action through the stack's own wiring, then re-render.
      * @param label - `Earlier`, `Later`, or `Remove`.
@@ -599,6 +647,58 @@ function renderStack(value) {
   assert.deepEqual(stack.chips(), ['Inter', 'sans-serif', 'Fira Code'])
 }
 
+// ── reordering: the arrows and the drop target share one rule ───────────────
+// `moveItem` is what both paths call, so the two can never disagree about the
+// resulting order.
+{
+  const list = ['A', 'B', 'C', 'D']
+  assert.deepEqual(plugin.moveItem(list, 0, 2), ['B', 'C', 'A', 'D'])
+  assert.deepEqual(plugin.moveItem(list, 3, 0), ['D', 'A', 'B', 'C'])
+  assert.deepEqual(plugin.moveItem(list, 1, 1), list, 'a no-op move returns the same reference')
+  // A drag can end past either end of the strip, so the target clamps.
+  assert.deepEqual(plugin.moveItem(list, 1, 99), ['A', 'C', 'D', 'B'])
+  assert.deepEqual(plugin.moveItem(list, 1, -5), ['B', 'A', 'C', 'D'])
+  // An out-of-range source is ignored rather than throwing.
+  assert.equal(plugin.moveItem(list, 9, 0), list)
+  assert.equal(plugin.moveItem(list, -1, 0), list)
+  assert.deepEqual(plugin.moveItem([], 0, 0), [])
+  assert.deepEqual(plugin.moveItem(['only'], 0, 0), ['only'])
+}
+
+// The drop target is decided by which half of the hovered chip the pointer is
+// in — the rule that silently reverses a drag when it is wrong.
+{
+  const rect = { left: 100, width: 40 } // midpoint at 120
+  assert.equal(plugin.dropTargetIndex(rect, 101, 2), 2, 'left half drops before')
+  assert.equal(plugin.dropTargetIndex(rect, 119, 2), 2)
+  assert.equal(plugin.dropTargetIndex(rect, 120, 2), 3, 'right half drops after')
+  assert.equal(plugin.dropTargetIndex(rect, 200, 2), 3)
+  // Missing geometry must not move anything.
+  assert.equal(plugin.dropTargetIndex(undefined, 150, 2), 2)
+  assert.equal(plugin.dropTargetIndex(null, 150, 2), 2)
+  assert.equal(plugin.dropTargetIndex({}, 150, 2), 2)
+}
+
+// End to end over the rule the drop handler applies: dropping onto the left
+// half of a chip and onto its right half must produce different orders.
+{
+  const list = ['A', 'B', 'C', 'D']
+  const rect = { left: 100, width: 40 }
+  const dropOn = (from, hovered, clientX) => {
+    const target = plugin.dropTargetIndex(rect, clientX, hovered)
+    // The handler removes the dragged item first, so a target past it shifts
+    // back by one; this mirrors that adjustment.
+    return plugin.moveItem(list, from, target > from ? target - 1 : target)
+  }
+  assert.deepEqual(dropOn(3, 1, 105), ['A', 'D', 'B', 'C'], 'D before B')
+  assert.deepEqual(dropOn(3, 1, 135), ['A', 'B', 'D', 'C'], 'D after B')
+  assert.deepEqual(dropOn(0, 2, 105), ['B', 'A', 'C', 'D'], 'A before C')
+  assert.deepEqual(dropOn(0, 2, 135), ['B', 'C', 'A', 'D'], 'A after C')
+  // Dropping an item onto itself in either half changes nothing.
+  assert.deepEqual(dropOn(2, 2, 105), list)
+  assert.deepEqual(dropOn(2, 2, 135), list)
+}
+
 // ── the combobox view: the picker's whole decision ──────────────────────────
 // Tested as a table over the pure function rather than through a faked React
 // runtime, so the assertions are about the behaviour and not about the stub.
@@ -657,6 +757,81 @@ function renderStack(value) {
     (element) => element.props?.className === 'dsh-font-warn',
   )
   assert.equal(warn, undefined, 'a stack ending in a generic family must not warn')
+}
+
+// The stack stamps the drag payload and reads the drop geometry — the two
+// halves of a drag that the chip itself only forwards.
+{
+  const stack = renderStack('Inter, "Fira Code", sans-serif')
+  const dragged = chipElements(stack.tree)[1]
+
+  // Drag start must set the transfer data, or Firefox never starts a drag.
+  const data = new Map()
+  dragged.props.onDragStart({
+    dataTransfer: { setData: (type, value) => data.set(type, value), effectAllowed: undefined },
+  })
+  assert.equal(data.get('text/plain'), '1', 'the drag must carry the chip index')
+
+  // The same handler marks the chip, so the strip can show it is in flight.
+  stack.rerender()
+  assert.equal(chipElements(stack.tree)[1].props.dragging, true, 'the dragged chip is marked')
+
+  // A drop with no drag in flight must do nothing, or an unrelated drop on the
+  // page would reorder the stack.
+  const before = stackWrites.length
+  chipElements(stack.tree)[0].props.onDrop({
+    preventDefault: () => undefined,
+    clientX: 135,
+    currentTarget: { getBoundingClientRect: () => ({ left: 100, width: 40 }) },
+    dataTransfer: { dropEffect: undefined },
+  })
+  assert.equal(stackWrites.length, before, 'a drop with no drag in flight must do nothing')
+
+  // Releasing clears the mark.
+  chipElements(stack.tree)[1].props.onDragEnd()
+  stack.rerender()
+  assert.equal(chipElements(stack.tree)[1].props.dragging, false, 'drag end clears the mark')
+}
+
+// A real drop reorders the stack. This is the end-to-end path: drag chip 0,
+// release over the right half of chip 2, expect it after chip 2.
+{
+  const stack = renderStack('Inter, "Fira Code", sans-serif')
+  assert.deepEqual(stack.chips(), ['Inter', 'Fira Code', 'sans-serif'])
+
+  chipElements(stack.tree)[0].props.onDragStart({
+    dataTransfer: { setData: () => undefined, effectAllowed: undefined },
+  })
+  stack.rerender()
+
+  // Right half of the third chip (indices 2), so the target is "after it".
+  chipElements(stack.tree)[2].props.onDrop({
+    preventDefault: () => undefined,
+    clientX: 135,
+    currentTarget: { getBoundingClientRect: () => ({ left: 100, width: 40 }) },
+    dataTransfer: { dropEffect: undefined },
+  })
+  stack.rerender()
+
+  assert.equal(stackWrites.at(-1), '"Fira Code", sans-serif, Inter')
+  assert.deepEqual(stack.chips(), ['Fira Code', 'sans-serif', 'Inter'])
+}
+
+// Dropping onto the left half of the first chip moves it to the front.
+{
+  const stack = renderStack('Inter, "Fira Code", sans-serif')
+  chipElements(stack.tree)[2].props.onDragStart({
+    dataTransfer: { setData: () => undefined, effectAllowed: undefined },
+  })
+  stack.rerender()
+  chipElements(stack.tree)[0].props.onDrop({
+    preventDefault: () => undefined,
+    clientX: 105,
+    currentTarget: { getBoundingClientRect: () => ({ left: 100, width: 40 }) },
+    dataTransfer: { dropEffect: undefined },
+  })
+  stack.rerender()
+  assert.deepEqual(stack.chips(), ['sans-serif', 'Inter', 'Fira Code'])
 }
 
 console.log('verify-client: family-stack editor verified')
