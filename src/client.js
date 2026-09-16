@@ -76,6 +76,357 @@ const CODE_FONT_SIZE_MAX = 20
 /** The interface text sizes the shipped components hard-code, in px. */
 const UI_TEXT_STEPS = [11, 12, 13, 14, 16, 20, 24]
 
+// ─── the font-family list: parse, serialize, discover ───────────────────────
+//
+// The stored value stays a plain CSS font-family string (that is what the host
+// schema declares and what the theme token consumes), so this section is purely
+// a presentation layer over it: parse the string into an ordered list for the
+// chips, and serialize the chips back. No schema field is added, which also
+// means an existing value keeps working untouched.
+
+/** Generic CSS families. Valid anywhere in a list, but only useful at the end. */
+const GENERIC_FAMILIES = [
+  'system-ui',
+  'sans-serif',
+  'serif',
+  'monospace',
+  'cursive',
+  'fantasy',
+  'math',
+  'emoji',
+  'fangsong',
+  'ui-sans-serif',
+  'ui-serif',
+  'ui-monospace',
+  'ui-rounded',
+]
+
+/**
+ * Popular families offered as suggestions even when not detected. Detection
+ * cannot see every font, and a family may be installed later, so the picker
+ * must not present itself as the complete truth.
+ */
+const COMMON_FAMILIES = [
+  'Inter',
+  'IBM Plex Sans',
+  'IBM Plex Mono',
+  'Noto Sans',
+  'Noto Sans SC',
+  'Noto Serif',
+  'Source Han Sans SC',
+  'Source Han Serif SC',
+  'JetBrains Mono',
+  'Fira Code',
+  'Fira Sans',
+  'Cascadia Code',
+  'Cascadia Mono',
+  'Maple Mono',
+  'Roboto',
+  'Roboto Mono',
+  'Open Sans',
+  'Lato',
+  'Montserrat',
+  'Poppins',
+  'Ubuntu',
+  'Ubuntu Mono',
+  'DejaVu Sans',
+  'DejaVu Sans Mono',
+  'Hack',
+  'Inconsolata',
+  'Iosevka',
+  'Comic Sans MS',
+  'PingFang SC',
+  'Hiragino Sans GB',
+  'Microsoft YaHei',
+  'Microsoft YaHei UI',
+  'Microsoft JhengHei',
+  'SimSun',
+  'SimHei',
+  'KaiTi',
+  'Segoe UI',
+  'Segoe UI Variable',
+  'Helvetica Neue',
+  'Arial',
+  'Consolas',
+  'Menlo',
+  'Monaco',
+  'SF Mono',
+  'Courier New',
+  'Times New Roman',
+  'Georgia',
+]
+
+/**
+ * Families worth probing for when the Local Font Access API is unavailable.
+ * Each entry costs two text measurements, so this stays curated rather than
+ * exhaustive.
+ */
+const PROBE_FAMILIES = [
+  ...new Set([...COMMON_FAMILIES, ...GENERIC_FAMILIES]),
+  '-apple-system',
+  'BlinkMacSystemFont',
+  'Meiryo',
+  'Yu Gothic',
+  'Malgun Gothic',
+  'Segoe UI Emoji',
+  'Noto Color Emoji',
+  'Apple Color Emoji',
+  'Cambria',
+  'Calibri',
+  'Candara',
+  'Corbel',
+  'Franklin Gothic Medium',
+  'Trebuchet MS',
+  'Verdana',
+  'Tahoma',
+  'Lucida Console',
+  'Lucida Sans Unicode',
+  'Palatino Linotype',
+  'Book Antiqua',
+  'Garamond',
+  'FangSong',
+  'Microsoft Himalaya',
+  'Sarasa Mono SC',
+  'LXGW WenKai',
+  'HarmonyOS Sans SC',
+  'MiSans',
+  'Source Code Pro',
+  'Roboto Condensed',
+  'Roboto Slab',
+  'PT Sans',
+  'PT Mono',
+  'Nunito',
+  'Rubik',
+  'Work Sans',
+  'Space Mono',
+  'Victor Mono',
+  'Cousine',
+  'Anonymous Pro',
+  'Liberation Mono',
+  'Liberation Sans',
+  'Nimbus Mono PS',
+  'Droid Sans Mono',
+]
+
+/** The family used as the "not installed" baseline when probing. */
+const PROBE_BASELINE = 'monospace'
+/** Text that renders differently across families in both width and height. */
+const PROBE_TEXT = 'mmmmmmmmmmlliWWQ@#中永'
+/** Probe font size, in px. */
+const PROBE_SIZE = 72
+/** One finished discovery result. */
+const FONT_DISCOVERY_CACHE_KEY = 'dsh-font:discovery'
+
+/**
+ * Split a CSS font-family string into its individual family names, unwrapping
+ * quotes. Commas inside quotes are preserved, which a naive `split(',')` gets
+ * wrong for the `"Foo, Bar"` form.
+ * @param value - a CSS font-family value.
+ * @returns family names in order; `[]` for a blank value.
+ */
+function parseFamilyList(value) {
+  if (typeof value !== 'string') return []
+  const families = []
+  let current = ''
+  let quote = ''
+  for (const char of value) {
+    if (quote !== '') {
+      if (char === quote) quote = ''
+      else current += char
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      continue
+    }
+    if (char === ',') {
+      families.push(current)
+      current = ''
+      continue
+    }
+    current += char
+  }
+  families.push(current)
+  return families.map((family) => family.trim()).filter((family) => family !== '')
+}
+
+/**
+ * Render one family name for a CSS list, quoting it when CSS requires it.
+ * A family is a sequence of identifiers, so anything with a space or a leading
+ * digit must be quoted; names are emitted double-quoted because that is the
+ * form the shipped defaults already use.
+ * @param family - a bare family name.
+ * @returns the CSS token for it.
+ */
+function quoteFamily(family) {
+  const name = family.trim()
+  if (name === '') return ''
+  // A CSS-wide keyword or a generic family must not be quoted: `"sans-serif"`
+  // would name a literal font instead of the generic family.
+  if (/^[A-Za-z][\w-]*$/.test(name)) return name
+  return `"${name.replaceAll('"', '')}"`
+}
+
+/**
+ * Join family names back into a CSS font-family string.
+ * @param families - family names in priority order.
+ * @returns the CSS value.
+ */
+function serializeFamilyList(families) {
+  return families.map(quoteFamily).filter((token) => token !== '').join(', ')
+}
+
+/**
+ * Measure whether one family is actually installed.
+ *
+ * The technique is the classic width/height comparison: render the probe text
+ * in `<family>, <baseline>` and again in the bare baseline. When the family is
+ * absent both renders lay out identically, because the browser fell through to
+ * the same baseline font. This needs no permission and works in every browser,
+ * which is why it is the fallback rather than the primary.
+ * @param family - family name to test.
+ * @returns whether it renders differently from the baseline.
+ */
+function isFamilyAvailable(family) {
+  if (typeof document === 'undefined') return false
+  if (family === PROBE_BASELINE) return true
+  const probe = document.createElement('span')
+  probe.textContent = PROBE_TEXT
+  probe.setAttribute('aria-hidden', 'true')
+  probe.style.cssText = [
+    'position:absolute',
+    'left:-9999px',
+    'top:-9999px',
+    'visibility:hidden',
+    'white-space:nowrap',
+    `font-size:${String(PROBE_SIZE)}px`,
+    'line-height:normal',
+  ].join(';')
+  const parent = document.body ?? document.documentElement
+  if (parent === null || parent === undefined) return false
+  parent.appendChild(probe)
+  try {
+    probe.style.fontFamily = PROBE_BASELINE
+    const baseWidth = probe.offsetWidth
+    const baseHeight = probe.offsetHeight
+    probe.style.fontFamily = `${quoteFamily(family)}, ${PROBE_BASELINE}`
+    return probe.offsetWidth !== baseWidth || probe.offsetHeight !== baseHeight
+  } finally {
+    probe.remove()
+  }
+}
+
+/**
+ * Ask the browser for the real installed families.
+ *
+ * Chromium's Local Font Access API is the only way to enumerate actual fonts.
+ * It is permission-gated, absent in Firefox and Safari, and — per the spec —
+ * browsers are not obliged to return the complete list, so the result is a
+ * supplement to the curated catalogue, never a replacement.
+ * @returns installed family names, or undefined when unavailable or declined.
+ */
+async function queryInstalledFamilies() {
+  if (typeof window === 'undefined') return undefined
+  const query = window.queryLocalFonts
+  if (typeof query !== 'function') return undefined
+  try {
+    const fonts = await query.call(window)
+    const families = new Set()
+    for (const font of fonts) {
+      if (typeof font?.family === 'string' && font.family.trim() !== '') {
+        families.add(font.family.trim())
+      }
+    }
+    return [...families].sort((left, right) => left.localeCompare(right))
+  } catch {
+    // A denied or dismissed permission prompt lands here. Fall back quietly:
+    // the picker still works, just with a smaller catalogue.
+    return undefined
+  }
+}
+
+/** Read the cached discovery result, if it is still valid. */
+function readDiscoveryCache() {
+  try {
+    const raw = sessionStorage.getItem(FONT_DISCOVERY_CACHE_KEY)
+    if (raw === null) return undefined
+    const parsed = JSON.parse(raw)
+    if (parsed === null || typeof parsed !== 'object') return undefined
+    if (!Array.isArray(parsed.families)) return undefined
+    return { families: parsed.families, enumerated: parsed.enumerated === true }
+  } catch {
+    return undefined
+  }
+}
+
+/** Remember a discovery result for the rest of the session. */
+function writeDiscoveryCache(result) {
+  try {
+    sessionStorage.setItem(FONT_DISCOVERY_CACHE_KEY, JSON.stringify(result))
+  } catch {
+    /* private mode or a full quota; the in-memory copy still serves this render */
+  }
+}
+
+/**
+ * Discover selectable families, cheapest source first: the session cache, then
+ * the Local Font Access API when the browser offers it, then the measurement
+ * probe. Measured families are verified as present; enumerated and curated ones
+ * are offered without that guarantee, and the UI says so.
+ * @returns `{ families, enumerated, measured }`.
+ */
+async function discoverFamilies() {
+  const cached = readDiscoveryCache()
+  if (cached !== undefined) return { ...cached, measured: true }
+
+  const enumerated = await queryInstalledFamilies()
+  if (enumerated !== undefined && enumerated.length > 0) {
+    const families = [...new Set([...enumerated, ...COMMON_FAMILIES])].sort((left, right) =>
+      left.localeCompare(right),
+    )
+    const result = { families, enumerated: true }
+    writeDiscoveryCache(result)
+    return { ...result, measured: true }
+  }
+
+  const installed = PROBE_FAMILIES.filter((family) => {
+    try {
+      return isFamilyAvailable(family)
+    } catch {
+      return false
+    }
+  })
+  const families = [...new Set([...installed, ...COMMON_FAMILIES])].sort((left, right) =>
+    left.localeCompare(right),
+  )
+  const result = { families, enumerated: false }
+  writeDiscoveryCache(result)
+  return { ...result, measured: true }
+}
+
+/**
+ * Rank the catalogue against what the user has typed: exact match, then prefix,
+ * then substring, then everything else. An empty query returns the catalogue
+ * as-is so the dropdown doubles as a browse list.
+ * @param families - the catalogue.
+ * @param query - the current input text.
+ * @returns the ordered candidates.
+ */
+function rankFamilyMatches(families, query) {
+  const needle = query.trim().toLowerCase()
+  if (needle === '') return families
+  const exact = []
+  const prefix = []
+  const contains = []
+  for (const family of families) {
+    const lower = family.toLowerCase()
+    if (lower === needle) exact.push(family)
+    else if (lower.startsWith(needle)) prefix.push(family)
+    else if (lower.includes(needle)) contains.push(family)
+  }
+  return [...exact, ...prefix, ...contains]
+}
+
 /** Curated family presets, offered as one-click fills for both inputs. */
 const UI_FAMILY_PRESETS = [
   { id: 'system', label: 'System', value: DEFAULT_UI_FONT_FAMILY },
@@ -137,6 +488,13 @@ const zh = {
   'font.presets': '预设',
   'font.increase': '增大',
   'font.decrease': '减小',
+  'font.add': '添加字体',
+  'font.remove': '移除',
+  'font.moveEarlier': '前移（优先级更高）',
+  'font.moveLater': '后移（优先级更低）',
+  'font.catalogEnumerated': '已读取本机字体',
+  'font.catalogProbed': '仅列出探测到的常用字体',
+  'font.genericWarning': '末尾缺少通用字体族（如 sans-serif），指定字体都缺失时可能回退到意外字体',
 }
 
 /** English dictionary, checked complete against the `zh` key set. */
@@ -159,6 +517,14 @@ const en = {
   'font.presets': 'Presets',
   'font.increase': 'Increase',
   'font.decrease': 'Decrease',
+  'font.add': 'Add font',
+  'font.remove': 'Remove',
+  'font.moveEarlier': 'Move earlier (higher priority)',
+  'font.moveLater': 'Move later (lower priority)',
+  'font.catalogEnumerated': 'Read from this machine',
+  'font.catalogProbed': 'Common fonts detected by probing',
+  'font.genericWarning':
+    'No generic family at the end (such as sans-serif), so a missing font may fall back unpredictably',
 }
 
 /** The stylesheet this plugin owns, keyed by the resolved settings section. */
@@ -425,6 +791,24 @@ const ROW_CSS = [
   '.dsh-font-chip[data-active="true"]{border-color:var(--dsw-static-neutral-bluish-400);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-module-platform)}',
   '.dsh-font-reset{align-self:flex-start;border:.5px solid var(--dsw-alias-border-l4);background:0 0;color:var(--dsw-alias-label-primary);cursor:pointer;border-radius:10px;padding:5px 12px;font-family:inherit;font-size:12px;line-height:18px}',
   '.dsh-font-reset:hover{background:var(--dsw-alias-interactive-bg-hover)}',
+  '/* The family stack: ordered chips, the combobox, and the derived value. */',
+  '.dsh-font-stack{flex-wrap:wrap;gap:6px;display:flex;min-height:22px;align-items:center}',
+  '.dsh-font-stackEmpty{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}',
+  '.dsh-font-token{align-items:center;gap:2px;background:var(--dsw-alias-bg-module-platform);border:.5px solid var(--dsw-alias-border-l4);border-radius:14px;padding:2px 4px 2px 10px;display:inline-flex;max-width:100%}',
+  '.dsh-font-tokenText{color:var(--dsw-alias-label-primary);font-size:12px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+  '.dsh-font-tokenActions{display:inline-flex;gap:1px;flex:none}',
+  '.dsh-font-tokenButton{border:none;background:0 0;color:var(--dsw-alias-label-secondary);cursor:pointer;width:18px;height:18px;border-radius:9px;justify-content:center;align-items:center;padding:0;font-size:11px;line-height:1;display:inline-flex}',
+  '.dsh-font-tokenButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}',
+  '.dsh-font-tokenButton:disabled{opacity:.3;cursor:default}',
+  '.dsh-font-tokenRemove:hover:not(:disabled){color:var(--dsw-alias-state-error-primary)}',
+  '.dsh-font-combo{position:relative}',
+  '.dsh-font-menu{position:absolute;z-index:20;left:0;right:0;top:calc(100% + 4px);max-height:240px;overflow-y:auto;margin:0;padding:4px;list-style:none;background:var(--dsw-alias-bg-layer-2);border:.5px solid var(--dsw-alias-border-l2);border-radius:10px;box-shadow:var(--dsw-elevation-panel)}',
+  '.dsh-font-option{cursor:pointer;border-radius:6px;padding:5px 8px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+  '.dsh-font-optionActive{background:var(--dsw-alias-interactive-bg-hover)}',
+  '.dsh-font-optionCustom{color:var(--dsw-alias-label-secondary);border-top:.5px solid var(--dsw-alias-border-l2);border-radius:0 0 6px 6px}',
+  '.dsh-font-optionName{font-family:inherit}',
+  '.dsh-font-meta{flex-wrap:wrap;gap:8px;justify-content:space-between;display:flex}',
+  '.dsh-font-warn{color:var(--dsw-alias-state-warn-primary);font-size:11px;line-height:16px}',
 ].join('')
 
 /** Install the row chrome stylesheet for the plugin's lifetime. */
@@ -466,50 +850,315 @@ function Field({ label, value, hint, children }) {
   )
 }
 
+/** Cap the suggestion list: rendering a 2000-entry catalogue is needless work. */
+const SUGGESTION_LIMIT = 60
+
 /**
- * A commit-on-blur/Enter text input that always reflects the durable value
- * once the user stops editing.
- * @param props - React props.
- * @returns the input element.
+ * The combobox's whole decision, as a pure function: which families to offer
+ * for the current query, which one is highlighted, and whether the custom
+ * "add what I typed" row applies.
+ *
+ * Keeping this out of the component is what makes the behaviour testable
+ * without a React runtime — an interaction test that fakes hooks proves less
+ * than a table test over this function does.
+ *
+ * @param families - the catalogue.
+ * @param query - the current input text.
+ * @param active - the highlighted index.
+ * @returns the row to render.
  */
-function FamilyInput({ value, placeholder, onCommit, monospace }) {
-  const [draft, setDraft] = useState(value)
-  const editing = useRef(false)
+function comboboxView(families, query, active) {
+  const typed = query.trim()
+  const matches = rankFamilyMatches(families, typed)
+  const visible = matches.slice(0, SUGGESTION_LIMIT)
+  const exact = matches.some((family) => family.toLowerCase() === typed.toLowerCase())
+  return {
+    typed,
+    visible,
+    // Clamp, so a catalogue that shrank under the cursor cannot index past the
+    // end and commit the wrong family.
+    active: visible.length === 0 ? 0 : Math.min(Math.max(active, 0), visible.length - 1),
+    /** The custom row: offered only for a non-empty, not-already-listed query. */
+    custom: typed !== '' && !exact ? typed : undefined,
+  }
+}
 
-  useEffect(() => {
-    if (!editing.current) setDraft(value)
-  }, [value])
+/**
+ * One selectable chip in the family list: click to remove, click the arrow to
+ * move it earlier in the fallback order.
+ *
+ * Order is the whole point of a CSS font stack — the first installed family
+ * wins — so reordering has to be a first-class action rather than a
+ * re-type-it-by-hand chore.
+ * @param props - React props.
+ * @returns the chip element.
+ */
+function FamilyChip({ family, index, count, onMove, onRemove, moveEarlier, moveLater, remove }) {
+  return React.createElement(
+    'span',
+    { className: 'dsh-font-token' },
+    React.createElement('span', { className: 'dsh-font-tokenText' }, family),
+    React.createElement(
+      'span',
+      { className: 'dsh-font-tokenActions' },
+      React.createElement(
+        'button',
+        {
+          type: 'button',
+          className: 'dsh-font-tokenButton',
+          disabled: index === 0,
+          title: moveEarlier,
+          'aria-label': `${moveEarlier}: ${family}`,
+          onClick: () => {
+            onMove(index, index - 1)
+          },
+        },
+        '\u2190',
+      ),
+      React.createElement(
+        'button',
+        {
+          type: 'button',
+          className: 'dsh-font-tokenButton',
+          disabled: index === count - 1,
+          title: moveLater,
+          'aria-label': `${moveLater}: ${family}`,
+          onClick: () => {
+            onMove(index, index + 1)
+          },
+        },
+        '\u2192',
+      ),
+      React.createElement(
+        'button',
+        {
+          type: 'button',
+          className: 'dsh-font-tokenButton dsh-font-tokenRemove',
+          title: remove,
+          'aria-label': `${remove}: ${family}`,
+          onClick: () => {
+            onRemove(index)
+          },
+        },
+        '\u00d7',
+      ),
+    ),
+  )
+}
 
-  const commit = useCallback(() => {
-    editing.current = false
-    const next = draft.trim()
-    if (next === '') {
-      setDraft(value)
+/**
+ * A combobox over the discovered family catalogue.
+ *
+ * Reads the system font list through {@link discoverFamilies} and offers
+ * filtered suggestions with keyboard navigation; picking one appends it to the
+ * stack. Any value may still be typed and committed, because the catalogue is
+ * never guaranteed complete.
+ * @param props - React props.
+ * @returns the combobox element.
+ */
+function FamilyCombobox({ families, disabled, placeholder, add, addLabel }) {
+  const [query, setQuery] = useState('')
+  const [open, setOpen] = useState(false)
+  const [active, setActive] = useState(0)
+
+  const { visible, typed, custom } = comboboxView(families, query, active)
+  // `active` is clamped inside the view, so the highlight can never point past
+  // the end of a catalogue that shrank under the cursor.
+  const highlighted = Math.min(active, Math.max(visible.length - 1, 0))
+
+  const commit = (family) => {
+    if (family === '') return
+    add(family)
+    setQuery('')
+    setOpen(false)
+    setActive(0)
+  }
+
+  const onKeyDown = (event) => {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      setOpen(true)
+      setActive((current) => Math.min(current + 1, Math.max(visible.length - 1, 0)))
       return
     }
-    if (next !== value) onCommit(next)
-  }, [draft, onCommit, value])
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      setActive((current) => Math.max(current - 1, 0))
+      return
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      commit(visible[highlighted] ?? typed)
+      return
+    }
+    if (event.key === 'Escape') {
+      setQuery('')
+      setOpen(false)
+    }
+  }
 
-  return React.createElement('input', {
-    type: 'text',
-    spellCheck: false,
-    className: monospace === true ? 'dsh-font-input dsh-font-code' : 'dsh-font-input',
-    value: draft,
-    placeholder,
-    onChange: (event) => {
-      editing.current = true
-      setDraft(event.target.value)
-    },
-    onBlur: commit,
-    onKeyDown: (event) => {
-      if (event.key === 'Enter') event.currentTarget.blur()
-      if (event.key === 'Escape') {
-        editing.current = false
-        setDraft(value)
-        event.currentTarget.blur()
-      }
-    },
-  })
+  return React.createElement(
+    'div',
+    { className: 'dsh-font-combo' },
+    React.createElement('input', {
+      type: 'text',
+      spellCheck: false,
+      className: 'dsh-font-input',
+      value: query,
+      placeholder,
+      disabled,
+      role: 'combobox',
+      'aria-expanded': open && visible.length > 0,
+      'aria-autocomplete': 'list',
+      'aria-label': addLabel,
+      onFocus: () => {
+        setOpen(true)
+      },
+      onBlur: () => {
+        // Delayed so a click on a suggestion lands before the list closes.
+        setTimeout(() => {
+          setOpen(false)
+        }, 150)
+      },
+      onChange: (event) => {
+        setQuery(event.target.value)
+        setOpen(true)
+      },
+      onKeyDown,
+    }),
+    open && visible.length > 0
+      ? React.createElement(
+          'ul',
+          { className: 'dsh-font-menu', role: 'listbox' },
+          visible.map((family, index) =>
+            React.createElement(
+              'li',
+              {
+                key: family,
+                role: 'option',
+                'aria-selected': index === highlighted,
+                className:
+                  index === highlighted
+                    ? 'dsh-font-option dsh-font-optionActive'
+                    : 'dsh-font-option',
+                // `onMouseDown` beats the input's blur, so the pick is not lost.
+                onMouseDown: (event) => {
+                  event.preventDefault()
+                  commit(family)
+                },
+                onMouseEnter: () => {
+                  setActive(index)
+                },
+              },
+              React.createElement('span', { className: 'dsh-font-optionName' }, family),
+            ),
+          ),
+          custom === undefined
+            ? null
+            : React.createElement(
+                'li',
+                {
+                  className: 'dsh-font-option dsh-font-optionCustom',
+                  onMouseDown: (event) => {
+                    event.preventDefault()
+                    commit(custom)
+                  },
+                },
+                `${addLabel}: "${custom}"`,
+              ),
+        )
+      : null,
+  )
+}
+
+/**
+ * The family-stack editor: chips in priority order plus a combobox to add more.
+ *
+ * Order is significant in CSS — the first installed family wins — so the chips
+ * are the value, and the underlying string is always re-derived from them.
+ * @param props - React props.
+ * @returns the editor element.
+ */
+function FamilyStack({
+  value,
+  families,
+  monospace,
+  fallback,
+  catalogStatus,
+  add,
+  addLabel,
+  remove,
+  moveEarlier,
+  moveLater,
+  genericWarning,
+}) {
+  const list = parseFamilyList(value)
+
+  const setList = (next) => {
+    const kept = next.filter((family) => family.trim() !== '')
+    // An empty stack is not a valid CSS value, so fall back to the shipped
+    // default rather than writing something the token cannot resolve.
+    add(kept.length === 0 ? fallback : serializeFamilyList(kept))
+  }
+
+  const onMove = (from, to) => {
+    if (to < 0 || to >= list.length) return
+    const next = [...list]
+    const [moved] = next.splice(from, 1)
+    next.splice(to, 0, moved)
+    setList(next)
+  }
+
+  const onRemove = (index) => {
+    setList(list.filter((_, position) => position !== index))
+  }
+
+  const onAdd = (family) => {
+    setList([...list, family])
+  }
+
+  const hasGeneric = list.some((family) => GENERIC_FAMILIES.includes(family.toLowerCase()))
+
+  return React.createElement(
+    'div',
+    { className: 'dsh-font-field' },
+    React.createElement(
+      'div',
+      { className: 'dsh-font-stack' },
+      list.length === 0
+        ? React.createElement('span', { className: 'dsh-font-stackEmpty' }, fallback)
+        : list.map((family, index) =>
+            React.createElement(FamilyChip, {
+              key: `${family}-${String(index)}`,
+              family,
+              index,
+              count: list.length,
+              onMove,
+              onRemove,
+              moveEarlier,
+              moveLater,
+              remove,
+            }),
+          ),
+    ),
+    React.createElement(FamilyCombobox, {
+      families,
+      placeholder: fallback,
+      add: onAdd,
+      addLabel,
+    }),
+    React.createElement(
+      'div',
+      { className: 'dsh-font-meta' },
+      React.createElement(
+        'span',
+        { className: monospace === true ? 'dsh-font-hint dsh-font-code' : 'dsh-font-hint' },
+        `font-family: ${serializeFamilyList(list)}`,
+      ),
+      React.createElement('span', { className: 'dsh-font-hint' }, catalogStatus),
+    ),
+    hasGeneric ? null : React.createElement('div', { className: 'dsh-font-warn' }, genericWarning),
+  )
 }
 
 /**
@@ -606,6 +1255,27 @@ function FontRow({ t, useStore, setField, reset }) {
   const contentFontSize = useStore((s) => s.contentFontSize)
   const codeFontSize = useStore((s) => s.codeFontSize)
 
+  // Discovery runs once per session (the result is cached) and only when this
+  // row is actually rendered, so the cost is never paid by a user who never
+  // opens Settings.
+  const [catalog, setCatalog] = useState({ families: COMMON_FAMILIES, enumerated: false })
+  useEffect(() => {
+    let cancelled = false
+    discoverFamilies()
+      .then((result) => {
+        if (!cancelled) setCatalog(result)
+      })
+      .catch(() => {
+        /* the curated catalogue is already in state */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const catalogStatus =
+    catalog.enumerated === true ? t('font.catalogEnumerated') : t('font.catalogProbed')
+
   return React.createElement(
     'div',
     { className: 'dsh-font-row' },
@@ -618,10 +1288,17 @@ function FontRow({ t, useStore, setField, reset }) {
     React.createElement(
       Field,
       { label: t('font.uiFamily'), hint: t('font.uiFamilyHint') },
-      React.createElement(FamilyInput, {
+      React.createElement(FamilyStack, {
         value: uiFontFamily,
-        placeholder: DEFAULT_UI_FONT_FAMILY,
-        onCommit: (value) => {
+        families: catalog.families,
+        fallback: DEFAULT_UI_FONT_FAMILY,
+        catalogStatus,
+        addLabel: t('font.add'),
+        remove: t('font.remove'),
+        moveEarlier: t('font.moveEarlier'),
+        moveLater: t('font.moveLater'),
+        genericWarning: t('font.genericWarning'),
+        add: (value) => {
           setField(UI_FONT_FAMILY_FIELD, value)
         },
       }),
@@ -636,11 +1313,18 @@ function FontRow({ t, useStore, setField, reset }) {
     React.createElement(
       Field,
       { label: t('font.codeFamily'), hint: t('font.codeFamilyHint') },
-      React.createElement(FamilyInput, {
+      React.createElement(FamilyStack, {
         value: codeFontFamily,
-        placeholder: DEFAULT_CODE_FONT_FAMILY,
+        families: catalog.families,
         monospace: true,
-        onCommit: (value) => {
+        fallback: DEFAULT_CODE_FONT_FAMILY,
+        catalogStatus,
+        addLabel: t('font.add'),
+        remove: t('font.remove'),
+        moveEarlier: t('font.moveEarlier'),
+        moveLater: t('font.moveLater'),
+        genericWarning: t('font.genericWarning'),
+        add: (value) => {
           setField(CODE_FONT_FAMILY_FIELD, value)
         },
       }),
