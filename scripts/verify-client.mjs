@@ -149,7 +149,26 @@ assert.equal(typeof plugin.fontStyleSheet, 'function')
 assert.equal(typeof plugin.applyFonts, 'function')
 assert.equal(typeof plugin.parseFamilyList, 'function')
 assert.equal(typeof plugin.serializeFamilyList, 'function')
+assert.equal(typeof plugin.normalizeWeight, 'function')
 assert.equal(typeof plugin.rankFamilyMatches, 'function')
+for (const name of [
+  'weightWord',
+  'faceWeights',
+  'emphasisWeight',
+  'parseFontQuery',
+  'fontQueryTokens',
+  'serializeFontQuery',
+  'queryContextAt',
+  'querySuggestions',
+  'applySuggestion',
+  'moveFontQueryEntry',
+  'queryTokenClass',
+  'clampHighlight',
+  'describeDiagnostic',
+  'FontQueryEditor',
+]) {
+  assert.equal(typeof plugin[name], 'function', `the bundle must export ${name}()`)
+}
 
 // ── the family list: parse and serialize ────────────────────────────────────
 // A naive `split(',')` is the obvious implementation and it is wrong: a quoted
@@ -214,6 +233,7 @@ assert.ok(
 const section = {
   uiFontFamily: 'Inter, sans-serif',
   codeFontFamily: '"JetBrains Mono", monospace',
+  codeFontWeight: 500,
   uiFontScale: 1.25,
   contentFontSize: 16,
   codeFontSize: 13,
@@ -221,6 +241,7 @@ const section = {
 const sheet = plugin.fontStyleSheet(section)
 assert.match(sheet, /--dsh-font-ui-scale:1\.25;/)
 assert.match(sheet, /--dsh-font-code-size:13px;/)
+assert.match(sheet, /--dsh-font-code-weight:500;/)
 // The content size is an INLINE custom property on `body` (ui-layout's theme
 // presenter owns that declaration), so the sheet must not declare it — an
 // inline value would win and nothing here could override it.
@@ -242,6 +263,25 @@ assert.ok(
 assert.match(sheet, /--dsh-font-markdown-h1:700 calc\(16px \+ 7px\) \/ calc\(16px \+ 16px\)/)
 assert.match(sheet, /--dsh-font-markdown-base:var\(--dsh-font-conversation-size,14px\) \/ calc\(16px \+ 10px\)/)
 assert.match(sheet, /--dsw-font-markdown-code-block-font-size:var\(--dsh-font-code-size,12px\) !important;/)
+
+// The code weight has no design-system token of its own, so it rides in the
+// `font:` value of every code token — a bare `font-family` cannot carry it, and
+// the shipped ladder is a literal 400 that nothing else would move. The size
+// and line-height must survive the substitution untouched.
+assert.match(sheet, /--dsw-font-markdown-code:var\(--dsh-font-code-weight,400\) var\(--dsh-font-code-size,12px\) \/ calc\(var\(--dsh-font-code-size,12px\) \+ 7px\)/)
+assert.match(sheet, /--dsw-font-markdown-code-block:var\(--dsh-font-code-weight,400\) var\(--dsh-font-code-size,12px\) \/ calc\(var\(--dsh-font-code-size,12px\) \+ 8px\)/)
+assert.match(sheet, /--dsw-font-markdown-code-block-small:var\(--dsh-font-code-weight,400\) calc\(var\(--dsh-font-code-size,12px\) - 1px\) \/ calc\(var\(--dsh-font-code-size,12px\) \+ 5px\)/)
+
+// Most code in the interface never reads a token: it is styled with
+// `font-family: var(--ds-font-family-code)` and a literal weight inside a
+// component stylesheet. Those are reached structurally, and only there — the
+// rule must stay scoped to code rather than becoming a universal weight.
+assert.match(sheet, /html body pre,html body code,html body \[class\*="code" i\]\{/)
+assert.match(sheet, /font-weight:var\(--dsh-font-code-weight,400\) !important;/)
+assert.ok(
+  !/body\s*\*\{[^}]*font-weight/.test(sheet),
+  'the code weight must not be applied to every element',
+)
 
 // A different content size must move the ladder, not just the base variable.
 const bigger = plugin.fontStyleSheet({ ...section, contentFontSize: 20 })
@@ -301,11 +341,18 @@ assert.equal(rootProperties.get('--ds-font-family-code'), '"JetBrains Mono", mon
 // presenter value would win over the stylesheet.
 assert.equal(bodyProperties.get('--dsh-content-font-size'), '16px')
 
-// Re-applying must rewrite the same tag, not accumulate stylesheets.
-plugin.applyFonts({ ...section, contentFontSize: 18, uiFontScale: 1 })
+// Re-applying must rewrite the same tag, not accumulate stylesheets, and a
+// changed weight must reach the sheet.
+plugin.applyFonts({ ...section, contentFontSize: 18, uiFontScale: 1, codeFontWeight: 700 })
 assert.equal(styleTags.length, 1, 'applyFonts must reuse its own stylesheet tag')
 assert.match(styleTags[0].textContent, /--dsh-font-ui-scale:1;/)
+assert.match(styleTags[0].textContent, /--dsh-font-code-weight:700;/)
 assert.equal(bodyProperties.get('--dsh-content-font-size'), '18px')
+
+// An unreadable stored weight must fall back to the shipped one rather than
+// writing an invalid declaration into every code `font:` shorthand.
+plugin.applyFonts({ ...section, codeFontWeight: 'wobble' })
+assert.match(styleTags[0].textContent, /--dsh-font-code-weight:400;/)
 
 // ── the interface-scale stamping pass ───────────────────────────────────────
 // A fake tree whose computed sizes are the shipped ones.
@@ -384,13 +431,494 @@ globalThis.document = {
   },
 }
 
-// ── the family-stack editor ─────────────────────────────────────────────────
-// Drive the real components rather than a re-implementation.
+// ── the font query: what the settings row edits ─────────────────────────────
 //
-// The React stub does not recursively render function-valued children, so a
-// `FamilyStack` tree holds its chips as unresolved `<FamilyChip>` elements.
-// The chips are therefore verified at their own level (they are pure), and the
-// stack is verified through them plus its own combobox.
+// The language is the CSS font-family list plus a weight word, which is the one
+// thing the list cannot carry. Everything here is a pure function of (text,
+// catalogue), so the table below is the specification.
+
+const QUERY_CATALOGUE = [
+  'Book Antiqua',
+  'Fira Code',
+  'Fira Sans',
+  'Franklin Gothic Medium',
+  'Geist Mono',
+  'Inter',
+  'Inter Tight',
+  'Roboto Mono',
+  'monospace',
+]
+/** The faces one machine reports, keyed by family. */
+const QUERY_STYLES = {
+  'Geist Mono': ['Regular', 'Medium', 'Bold', 'Bold Italic'],
+  Inter: ['Thin', 'Regular', 'SemiBold'],
+}
+const QUERY = { catalogue: QUERY_CATALOGUE, styles: QUERY_STYLES, enumerated: true }
+
+// One family plus its weight: the case the whole language exists for. Geist Mono
+// is a variable font, so `medium` is its 500 face and not part of a family name.
+{
+  const read = plugin.parseFontQuery('Geist Mono medium', QUERY)
+  assert.deepEqual(read.families, ['Geist Mono'])
+  assert.equal(read.weight, 500)
+  assert.equal(read.weightWord, 'medium')
+  assert.equal(read.effective, 0)
+  assert.deepEqual(read.diagnostics, [])
+}
+
+// The canonical form quotes the family and leaves the weight where it reads as
+// a property of that family — and parses back into the same two values, which is
+// what lets one text field be the source of both settings.
+{
+  const value = plugin.serializeFontQuery(['Geist Mono', 'monospace'], 500)
+  assert.equal(value, '"Geist Mono" medium, monospace')
+  const read = plugin.parseFontQuery(value, QUERY)
+  assert.deepEqual(read.families, ['Geist Mono', 'monospace'])
+  assert.equal(read.weight, 500)
+  assert.equal(read.weightWord, 'medium')
+}
+
+// A bare weight word stands on its own: it sets the axis weight without naming
+// a family, which is how a query that only carries a weight is written.
+{
+  const read = plugin.parseFontQuery('Inter, medium', QUERY)
+  assert.deepEqual(read.families, ['Inter'])
+  assert.equal(read.weight, 500)
+}
+{
+  const read = plugin.parseFontQuery('medium', QUERY)
+  assert.deepEqual(read.families, [])
+  assert.equal(read.weight, 500)
+  assert.equal(read.effective, -1)
+}
+
+// Only the LAST word of an unquoted entry can be a weight, and a name that is
+// itself a catalogued family keeps its word: stripping `Book Antiqua` or
+// `Franklin Gothic Medium` would silently retarget the stack at a font nobody
+// picked. `Fira Sans Book` is the case the split is for.
+for (const name of ['Book Antiqua', 'Franklin Gothic Medium']) {
+  const read = plugin.parseFontQuery(name, QUERY)
+  assert.deepEqual(read.families, [name])
+  assert.equal(read.weight, undefined)
+}
+{
+  const read = plugin.parseFontQuery('Fira Sans Book', QUERY)
+  assert.deepEqual(read.families, ['Fira Sans'])
+  assert.equal(read.weight, 400)
+}
+// Anything that is not a weight word is part of the name, even after a word
+// that is one — `Geist Mono SemiBold Italic` is one name, not a guess.
+{
+  const read = plugin.parseFontQuery('Geist Mono SemiBold Italic', QUERY)
+  assert.deepEqual(read.families, ['Geist Mono SemiBold Italic'])
+  assert.equal(read.weight, undefined)
+}
+// A quoted name is verbatim, so only text AFTER the closing quote can be a
+// weight — this is the form the canonical serializer writes.
+{
+  const read = plugin.parseFontQuery('"Geist Mono" bold', QUERY)
+  assert.deepEqual(read.families, ['Geist Mono'])
+  assert.equal(read.weight, 700)
+}
+{
+  const read = plugin.parseFontQuery('"Book Antiqua"', QUERY)
+  assert.deepEqual(read.families, ['Book Antiqua'])
+  assert.equal(read.weight, undefined)
+}
+
+// The weight belongs to the axis, so it is honoured wherever it is written but
+// only counted once.
+{
+  const read = plugin.parseFontQuery('Inter bold, monospace light', QUERY)
+  assert.equal(read.weight, 700)
+  assert.deepEqual(read.diagnostics.map((d) => d.code), ['duplicate-weight', 'missing-weight'])
+  assert.equal(read.diagnostics[1].weight, 700)
+}
+
+// Bad text is reported, never silently dropped: an unclosed quote swallows the
+// rest of the entry, and a word after a quoted name is neither the name nor a
+// weight.
+{
+  const unclosed = plugin.parseFontQuery('"Geist Mono', QUERY)
+  assert.deepEqual(unclosed.families, ['Geist Mono'])
+  assert.deepEqual(unclosed.diagnostics.map((d) => d.code), ['unclosed-quote'])
+}
+{
+  const stray = plugin.parseFontQuery('"Geist Mono" wobble', QUERY)
+  assert.deepEqual(stray.families, ['Geist Mono'])
+  assert.equal(stray.weight, undefined)
+  assert.deepEqual(stray.diagnostics.map((d) => d.code), ['trailing-text'])
+}
+
+// A family the machine does not list is worth saying out loud — but only when
+// the catalogue is authoritative; the curated fallback list is not evidence.
+{
+  const read = plugin.parseFontQuery('Nope Sans, monospace', QUERY)
+  assert.deepEqual(read.diagnostics.map((d) => d.code), ['unknown-family'])
+  assert.equal(read.diagnostics[0].name, 'Nope Sans')
+  assert.deepEqual(
+    plugin.parseFontQuery('Nope Sans, monospace', { catalogue: QUERY_CATALOGUE, enumerated: false })
+      .diagnostics,
+    [],
+  )
+  // The generic fallback is what the browser will really use when nothing
+  // before it is installed.
+  assert.equal(read.effective, 1)
+}
+
+// A weight the family has no face for is synthesized by the browser, so it is
+// reported — and only when the faces were actually read.
+{
+  const read = plugin.parseFontQuery('Inter bold', QUERY)
+  assert.deepEqual(read.diagnostics.map((d) => d.code), ['missing-weight'])
+  assert.equal(read.diagnostics[0].name, 'Inter')
+  assert.equal(read.diagnostics[0].weight, 700)
+  assert.deepEqual(
+    plugin.parseFontQuery('Inter bold', { catalogue: QUERY_CATALOGUE, styles: {}, enumerated: true })
+      .diagnostics,
+    [],
+  )
+}
+
+// Serialization: quoting rules, the weight only on the first family, and an
+// empty stack staying empty rather than becoming a stray space.
+assert.equal(plugin.serializeFontQuery(['Inter', 'sans-serif'], 400), 'Inter regular, sans-serif')
+assert.equal(plugin.serializeFontQuery(['Foo, Bar', 'monospace'], undefined), '"Foo, Bar", monospace')
+assert.equal(plugin.serializeFontQuery(['-apple-system', 'sans-serif'], 400), '-apple-system regular, sans-serif')
+assert.equal(plugin.serializeFontQuery([], 500), '')
+assert.equal(plugin.serializeFontQuery(undefined, undefined), '')
+for (const value of [
+  'Inter regular, "PingFang SC", sans-serif',
+  '"Geist Mono" medium, monospace',
+  '"Foo, Bar", "Baz, Qux", serif',
+]) {
+  const read = plugin.parseFontQuery(value, QUERY)
+  assert.equal(
+    plugin.serializeFontQuery(read.families, read.weight),
+    value,
+    `the canonical form of ${value} must be itself`,
+  )
+}
+
+// The number a stored value stands for, and the word the query spells it with.
+assert.equal(plugin.normalizeWeight('medium'), 500)
+assert.equal(plugin.normalizeWeight('Medium'), 500)
+assert.equal(plugin.normalizeWeight(700), 700)
+assert.equal(plugin.normalizeWeight('book'), 400)
+assert.equal(plugin.normalizeWeight(undefined), 400)
+assert.equal(plugin.normalizeWeight('wobble'), 400)
+assert.equal(plugin.normalizeWeight(550), 400)
+assert.equal(plugin.weightWord(500), 'medium')
+assert.equal(plugin.weightWord(400), 'regular')
+assert.equal(plugin.weightWord(900), 'black')
+
+// Face styles are the only weight evidence the browser gives, and its spelling
+// is not guaranteed, so an intensifier written apart has to be folded back.
+assert.deepEqual(plugin.faceWeights(['Semi Bold', 'ExtraLight', 'Bold Italic', 'Regular']), [
+  200, 400, 600, 700,
+])
+assert.deepEqual(plugin.faceWeights(['Light', 'Medium', 'Black']), [300, 500, 900])
+assert.deepEqual(plugin.faceWeights(['Italic', 'Oblique']), [])
+assert.deepEqual(plugin.faceWeights(undefined), [])
+
+// ── the highlight: tokens that concatenate back into the input ───────────────
+// This invariant is what keeps the painted layer aligned with the textarea, so
+// it is asserted over shapes that stress quotes, weight words, and spacing.
+for (const value of [
+  '',
+  'Geist Mono medium',
+  'Geist Mono medium, "Zhuque Fangsong (technical preview)", monospace',
+  '"Foo, Bar" bold ,  Inter',
+  'Inter,',
+  '   ',
+  '"unclosed, monospace',
+]) {
+  const tokens = plugin.fontQueryTokens(value, QUERY)
+  assert.equal(
+    tokens.map((token) => token.text).join(''),
+    value,
+    `tokens must reproduce ${JSON.stringify(value)} exactly`,
+  )
+}
+
+{
+  const tokens = plugin.fontQueryTokens('Geist Mono medium, "Foo, Bar", monospace', {
+    ...QUERY,
+    catalogue: [...QUERY_CATALOGUE, 'Foo, Bar'],
+  })
+  assert.deepEqual(
+    tokens.map((token) => [token.text, token.kind]),
+    [
+      ['Geist Mono ', 'family'],
+      ['medium', 'weight'],
+      [',', 'comma'],
+      [' ', 'space'],
+      ['"Foo, Bar"', 'family'],
+      [',', 'comma'],
+      [' ', 'space'],
+      ['monospace', 'generic'],
+    ],
+  )
+  // The family is carried on the token so the layer can mark the one in effect.
+  assert.equal(tokens[0].family, 'Geist Mono')
+  assert.equal(tokens[1].family, 'Geist Mono')
+  assert.equal(tokens[7].family, 'monospace')
+}
+
+// A family the machine does not have is painted apart, but only when the
+// catalogue is authoritative — otherwise every curated name would look wrong.
+{
+  const unknown = plugin.fontQueryTokens('Nope Sans, monospace', QUERY)
+  assert.equal(unknown[0].kind, 'unknown')
+  assert.equal(plugin.fontQueryTokens('Nope Sans', { catalogue: [], enumerated: false })[0].kind, 'family')
+}
+
+// The pill marks the family that is in effect — the first one the browser can
+// actually use — and nothing else.
+{
+  const tokens = plugin.fontQueryTokens('"Nope Sans", monospace', QUERY)
+  assert.equal(plugin.queryTokenClass(tokens[0], 'monospace'), 'dsh-font-qUnknown')
+  assert.equal(plugin.queryTokenClass(tokens[3], 'monospace'), 'dsh-font-qGeneric dsh-font-qEffective')
+  assert.equal(plugin.queryTokenClass({ text: ',', kind: 'comma' }, 'monospace'), 'dsh-font-qComma')
+  assert.equal(plugin.queryTokenClass({ text: ' ', kind: 'space' }, 'monospace'), '')
+}
+
+// The highlighted row is clamped against a list that may have shrunk under the
+// cursor, so the popup can never commit a row that is not on screen.
+assert.equal(plugin.clampHighlight([], 3), -1)
+assert.equal(plugin.clampHighlight(['a', 'b'], 9), 1)
+assert.equal(plugin.clampHighlight(['a', 'b'], -4), 0)
+
+// ── the caret's entry, and what the popup offers there ───────────────────────
+// The completion replaces the WHOLE entry, because a family name is several
+// words: completing `geist mo` has to replace both of them.
+{
+  const context = plugin.queryContextAt('Inter, geist mo', 15)
+  assert.deepEqual(
+    [context.start, context.end, context.core, context.head, context.word],
+    [6, 15, 'geist mo', 'geist', 'mo'],
+  )
+}
+// A trailing complete weight word is not part of the family, so the family text
+// ends before it — `"Geist Mono" medium` must still suggest families.
+{
+  const context = plugin.queryContextAt('"Geist Mono" medium', 19)
+  assert.equal(context.weightWord, 'medium')
+  assert.equal(context.familyEnd, 12)
+  assert.equal(context.caretInCore >= context.familyEnd, true)
+}
+// The last entry is the caret's entry even when the caret sits past its end,
+// and an empty query is one empty entry rather than none.
+assert.equal(plugin.queryContextAt('Inter, monospace', 999).core, 'monospace')
+assert.equal(plugin.queryContextAt('', 0).core, '')
+assert.equal(plugin.queryContextAt('Inter', 2).word, 'Inter')
+
+// A partial family name completes to the family, and the typed text stays
+// available as a custom row because the catalogue is never complete.
+{
+  const suggestion = plugin.querySuggestions(plugin.queryContextAt('geist', 5), QUERY)
+  assert.deepEqual(suggestion.items.map((item) => item.insert), ['"Geist Mono"'])
+  assert.equal(suggestion.custom, 'geist')
+  assert.deepEqual([suggestion.start, suggestion.end], [0, 5])
+}
+// An exact family name leads with its WEIGHTS, written as `<family> <weight>` so
+// one pick sets both fields — and only the weights the machine actually has.
+{
+  const suggestion = plugin.querySuggestions(plugin.queryContextAt('Geist Mono', 10), QUERY)
+  assert.deepEqual(
+    suggestion.items.slice(0, 3).map((item) => [item.kind, item.insert, item.weight]),
+    [
+      ['weight', '"Geist Mono" regular', 400],
+      ['weight', '"Geist Mono" medium', 500],
+      ['weight', '"Geist Mono" bold', 700],
+    ],
+  )
+  // No custom row: the typed text already names a family.
+  assert.equal(suggestion.custom, undefined)
+}
+// With no face data the whole closed vocabulary is offered instead, so a weight
+// is still discoverable without the Local Font Access permission.
+{
+  const suggestion = plugin.querySuggestions(plugin.queryContextAt('monospace', 9), {
+    catalogue: QUERY_CATALOGUE,
+    enumerated: false,
+  })
+  assert.deepEqual(
+    suggestion.items.slice(0, 9).map((item) => item.weight),
+    [100, 200, 300, 400, 500, 600, 700, 800, 900],
+  )
+}
+// A query that already states its weight is never silently moved by an Enter
+// that accepts the highlighted row: the stated weight leads its own list, and a
+// family pick carries the word along.
+{
+  const context = plugin.queryContextAt('"Geist Mono" medium', 19)
+  const suggestion = plugin.querySuggestions(context, QUERY)
+  assert.equal(suggestion.items[0].word, 'medium')
+  assert.equal(suggestion.items[0].insert, '"Geist Mono" medium')
+  assert.equal(suggestion.items.at(-1).insert, '"Geist Mono" medium')
+  // Swapping the family keeps the weight the user wrote rather than resetting it.
+  const swap = plugin.queryContextAt('"Geist Mono" medium', 19)
+  const inter = plugin.querySuggestions(
+    { ...swap, inner: 'Inter', head: 'Inter', word: '' },
+    QUERY,
+  ).items.find((item) => item.name === 'Inter')
+  assert.equal(inter.insert, 'Inter medium')
+}
+// A word after a complete family is read as a weight prefix: `Geist Mono b`
+// offers Bold, and nothing else — Geist Mono has no Black face here.
+{
+  const suggestion = plugin.querySuggestions(plugin.queryContextAt('Geist Mono b', 12), QUERY)
+  assert.deepEqual(suggestion.items.map((item) => item.word), ['bold'])
+  assert.equal(suggestion.custom, 'Geist Mono b')
+}
+// A partial family name keeps the FAMILY list first, even when the text before
+// the caret happens to be a family of its own: `inter t` means Inter Tight.
+{
+  const suggestion = plugin.querySuggestions(plugin.queryContextAt('inter t', 7), QUERY)
+  assert.equal(suggestion.items[0].name, 'Inter Tight')
+  assert.equal(suggestion.items[0].kind, 'family')
+}
+// An empty query browses, and offers no custom row — an Enter there must not
+// replace the stack with whatever happens to sort first.
+{
+  const suggestion = plugin.querySuggestions(plugin.queryContextAt('', 0), QUERY)
+  assert.ok(suggestion.items.length > 0, 'an empty query browses the catalogue')
+  assert.equal(suggestion.custom, undefined)
+}
+// A name the catalogue does not have is still insertable, quoted the way CSS
+// requires it — and the weight word the user typed goes in with it.
+{
+  const suggestion = plugin.querySuggestions(plugin.queryContextAt('My Font bold', 11), QUERY)
+  assert.deepEqual(suggestion.items, [])
+  assert.equal(suggestion.custom, 'My Font bold')
+}
+// Taking a completion replaces the entry and invites the next one with a comma —
+// except after a weight, which completes the entry instead.
+{
+  const context = plugin.queryContextAt('geist', 5)
+  const suggestion = plugin.querySuggestions(context, QUERY)
+  assert.equal(suggestion.at, 'entry')
+  assert.deepEqual(plugin.applySuggestion('geist', suggestion, '"Geist Mono"', 'family'), {
+    text: '"Geist Mono", ',
+    caret: 14,
+  })
+  assert.deepEqual(plugin.applySuggestion('geist', suggestion, '"Geist Mono" medium', 'weight'), {
+    text: '"Geist Mono" medium',
+    caret: 19,
+  })
+  // An entry in the middle keeps the comma that already separates it.
+  const middle = plugin.queryContextAt('geist, monospace', 5)
+  assert.deepEqual(
+    plugin.applySuggestion('geist, monospace', plugin.querySuggestions(middle, QUERY), '"Geist Mono"', 'family'),
+    { text: '"Geist Mono", monospace', caret: 12 },
+  )
+  // A custom row inserts the typed text as it stands.
+  const custom = plugin.querySuggestions(plugin.queryContextAt('My Font', 7), QUERY)
+  assert.equal(plugin.applySuggestion('My Font', custom, 'My Font', 'custom').text, 'My Font, ')
+}
+
+// A caret at the START of a complete entry is a boundary: the pick goes in ahead
+// of it, so the family already there stays as a fallback. That is how a font is
+// put in charge without dragging anything.
+{
+  const context = plugin.queryContextAt('"Geist Mono", monospace', 0)
+  const suggestion = plugin.querySuggestions(context, QUERY)
+  assert.equal(suggestion.at, 'before')
+  assert.deepEqual(plugin.applySuggestion('"Geist Mono", monospace', suggestion, 'Inter', 'family'), {
+    text: 'Inter, "Geist Mono", monospace',
+    caret: 7,
+  })
+  // Ahead of a middle entry: the entry's own spacing does not double up.
+  const middle = plugin.queryContextAt('"Geist Mono", monospace', 14)
+  assert.equal(middle.core, 'monospace')
+  assert.deepEqual(
+    plugin.applySuggestion('"Geist Mono", monospace', plugin.querySuggestions(middle, QUERY), 'Inter', 'family'),
+    { text: '"Geist Mono", Inter, monospace', caret: 21 },
+  )
+  // A weight completes the entry it sits next to, at a boundary or not.
+  assert.equal(
+    plugin.applySuggestion('"Geist Mono", monospace', suggestion, '"Inter" medium', 'weight').text,
+    '"Inter" medium, monospace',
+  )
+}
+
+// ── moving an entry: the keyboard's answer to drag-and-drop ─────────────────
+// Order is significant (the first installed family wins), so it has to be
+// editable — but as text, which leaves every space and comma exactly where the
+// user put it.
+assert.deepEqual(plugin.moveFontQueryEntry('Inter, monospace, "Fira Code"', 3, 1), {
+  text: 'monospace, Inter, "Fira Code"',
+  caret: 14,
+})
+assert.deepEqual(plugin.moveFontQueryEntry('Inter, monospace, "Fira Code"', 26, -1), {
+  text: 'Inter, "Fira Code", monospace',
+  caret: 15,
+})
+// The spacing is the user's, not the serializer's: a move only reorders.
+{
+  const source = 'Inter ,  monospace'
+  const moved = plugin.moveFontQueryEntry(source, 16, -1)
+  assert.deepEqual([...moved.text].sort(), [...source].sort(), 'a move must not lose a character')
+  assert.equal(moved.text.replace(/\s+/g, ' '), 'monospace , Inter')
+}
+// Moving off either end of the list changes nothing at all.
+{
+  const source = 'Inter, monospace'
+  assert.deepEqual(plugin.moveFontQueryEntry(source, 2, -1), { text: source, caret: 2 })
+  assert.deepEqual(plugin.moveFontQueryEntry(source, 16, 1), { text: source, caret: 16 })
+  assert.deepEqual(plugin.moveFontQueryEntry('Inter', 2, 1), { text: 'Inter', caret: 2 })
+}
+
+// ── the interface weight, which is opted into ───────────────────────────────
+// The interface has a weight hierarchy, so setting the base has to move the
+// heading steps with it rather than flatten them — and the shipped 400 must
+// emit nothing at all, keeping a default install's sheet byte-identical.
+assert.equal(plugin.emphasisWeight(700, 400), 700)
+assert.equal(plugin.emphasisWeight(700, 500), 800)
+assert.equal(plugin.emphasisWeight(600, 500), 700)
+assert.equal(plugin.emphasisWeight(500, 500), 600)
+assert.equal(plugin.emphasisWeight(700, 100), 700)
+assert.equal(plugin.emphasisWeight(700, 900), 900)
+{
+  const plain = plugin.fontStyleSheet({ ...section, uiFontWeight: 400 })
+  assert.equal(plain, sheet, 'the shipped interface weight must change nothing')
+  assert.ok(!plain.includes('font-weight:400}'), 'no rule is emitted for the shipped weight')
+
+  const heavy = plugin.fontStyleSheet({ ...section, uiFontWeight: 500 })
+  assert.match(heavy, /html body\{font-weight:500\}/)
+  assert.match(heavy, /--dsh-font-markdown-base:500 var\(--dsh-font-conversation-size,14px\)/)
+  assert.match(heavy, /--dsh-font-markdown-table:500 calc\(16px - 1px\)/)
+  assert.match(heavy, /--dsh-font-markdown-h1:800 calc\(16px \+ 7px\)/)
+  assert.match(heavy, /--dsh-font-markdown-h4:700 var\(--dsh-font-conversation-size,14px\)/)
+  assert.match(heavy, /--dsh-font-markdown-table-head:600 calc\(16px - 1px\)/)
+  // The code ladder is a different axis and must not move with it.
+  assert.match(heavy, /--dsw-font-markdown-code:var\(--dsh-font-code-weight,400\)/)
+}
+
+// ── the diagnostic messages the row shows ───────────────────────────────────
+assert.equal(
+  plugin.describeDiagnostic(
+    { code: 'missing-weight', name: 'Inter', weight: 700, word: 'bold' },
+    { missingWeight: '{family}→{weight}→{word}' },
+  ),
+  'Inter→700→bold',
+)
+assert.equal(
+  plugin.describeDiagnostic({ code: 'unknown-family', name: 'X' }, { unknownFamily: 'no {name}' }),
+  'no X',
+)
+assert.equal(plugin.describeDiagnostic({ code: 'unclosed-quote' }, { unclosedQuote: 'open' }), 'open')
+assert.equal(
+  plugin.describeDiagnostic({ code: 'trailing-text', text: 'wobble' }, { trailingText: 'stray {text}' }),
+  'stray wobble',
+)
+assert.equal(plugin.describeDiagnostic({ code: 'nonsense' }, {}), '')
+
+// ── the editor component ────────────────────────────────────────────────────
+// The React stub does not recursively render function children, so the editor
+// is driven at its own level: its handlers are called the way a browser calls
+// them, and the tree it returns is inspected.
 
 /** Collect every element in a tree, depth-first, flattening array children. */
 function collectElements(node, out = []) {
@@ -407,434 +935,387 @@ function collectElements(node, out = []) {
   return out
 }
 
-/** Every unresolved `<FamilyChip>` element in a tree, in order. */
-function chipElements(tree) {
-  return collectElements(tree).filter(
-    (element) => typeof element.type === 'function' && element.type.name === 'FamilyChip',
-  )
+/** The copy the editor takes as props, so the component stays locale-free. */
+const EDITOR_LABELS = {
+  list: 'font.suggestions',
+  add: 'font.add',
+  font: 'font.familyKind',
+  generic: 'font.genericKind',
+  weightLine: 'font.codeWeight',
+  weightShipped: 'font.weightShipped',
+  pending: 'font.pending',
+  emptyQuery: 'font.emptyQuery',
+  genericWarning: 'font.genericWarning',
+  unknownFamily: 'no {name} here',
+  missingWeight: '{family} has no {weight} ({word})',
+  duplicateWeight: 'one weight only ({word})',
+  unclosedQuote: 'unclosed quote',
+  trailingText: 'stray {text}',
+  weightName: (weight) => `w${String(weight)}`,
 }
-
-const CHIP_CALLS = ['Inter', 'Fira Code', 'Fira Sans', 'Roboto', 'sans-serif']
-
-/** Render one chip and capture the callbacks it fires. */
-function renderChip(family, index, count = CHIP_CALLS.length) {
-  const calls = []
-  const events = []
-  const tree = plugin.FamilyChip({
-    family,
-    index,
-    count,
-    onMove: (from, to) => calls.push(['move', from, to]),
-    onRemove: (position) => calls.push(['remove', position]),
-    moveEarlier: 'Earlier',
-    moveLater: 'Later',
-    remove: 'Remove',
-    onDragStart: (event) => events.push(['dragStart', event]),
-    onDragEnd: () => events.push(['dragEnd']),
-    onDragOver: (event) => events.push(['dragOver', event]),
-    onDrop: (event) => events.push(['drop', event]),
-  })
-  return {
-    tree,
-    calls,
-    events,
-    /** Fire the action whose aria-label is `<label>: <family>`. */
-    fire(label) {
-      const button = collectElements(tree).find(
-        (element) =>
-          element.type === 'button' && element.props?.['aria-label'] === `${label}: ${family}`,
-      )
-      assert.ok(button !== undefined, `no "${label}" button on the ${family} chip`)
-      if (button.props.disabled === true) return false
-      button.props.onClick()
-      return true
-    },
-    button(label) {
-      return collectElements(tree).find(
-        (element) =>
-          element.type === 'button' && element.props?.['aria-label'] === `${label}: ${family}`,
-      )
-    },
-    /** The chip's own element (the drop target). */
-    root() {
-      return tree
-    },
-  }
-}
-
-// A chip shows its family name and offers all three actions.
-{
-  const chip = renderChip('Fira Code', 1)
-  const labels = collectElements(chip.tree)
-    .filter((element) => element.type === 'button')
-    .map((element) => element.props['aria-label'])
-  assert.deepEqual(labels, ['Earlier: Fira Code', 'Later: Fira Code', 'Remove: Fira Code'])
-}
-
-// Moving and removing report the right positions: off-by-one here would
-// reorder the wrong font, which is the whole failure mode of this control.
-{
-  const chip = renderChip('Fira Code', 1)
-  assert.equal(chip.fire('Earlier'), true)
-  assert.deepEqual(chip.calls.at(-1), ['move', 1, 0])
-  chip.fire('Later')
-  assert.deepEqual(chip.calls.at(-1), ['move', 1, 2])
-  chip.fire('Remove')
-  assert.deepEqual(chip.calls.at(-1), ['remove', 1])
-}
-
-// The first chip cannot move earlier; the last cannot move later.
-{
-  const first = renderChip('Inter', 0)
-  assert.equal(first.button('Earlier').props.disabled, true)
-  assert.equal(first.fire('Earlier'), false)
-  assert.equal(first.calls.length, 0)
-  const last = renderChip('sans-serif', CHIP_CALLS.length - 1)
-  assert.equal(last.button('Later').props.disabled, true)
-  assert.equal(last.fire('Later'), false)
-}
-
-// Drag wiring: the arrows are the drag handle and the whole chip is the drop
-// target, so the two halves of a drag are attached where the pointer goes.
-{
-  const chip = renderChip('Fira Code', 1)
-  const earlier = chip.button('Earlier')
-  assert.equal(earlier.props.draggable, true, 'the arrow must be draggable')
-  assert.equal(typeof earlier.props.onDragStart, 'function')
-  assert.equal(typeof earlier.props.onDragEnd, 'function')
-
-  const root = chip.root()
-  assert.equal(typeof root.props.onDragOver, 'function', 'the chip must accept a hover')
-  assert.equal(typeof root.props.onDrop, 'function', 'the chip must accept a drop')
-
-  // The index itself is stamped by the STACK's handler — the chip only
-  // forwards — so that is asserted against the stack below.
-}
-
-// A chip being dragged is marked, so the strip can show it is in flight.
-{
-  const dragging = plugin.FamilyChip({
-    family: 'Inter',
-    index: 0,
-    count: 2,
-    onMove: () => undefined,
-    onRemove: () => undefined,
-    moveEarlier: 'E',
-    moveLater: 'L',
-    remove: 'R',
-    dragging: true,
-  })
-  assert.match(dragging.props.className, /dsh-font-tokenDragging/)
-}
-
-const stackWrites = []
 
 /**
- * Render the family-stack editor and re-render after each interaction, the way
- * a state update would.
- * @param value - the stored CSS font-family string.
- * @returns the rendered tree plus interaction helpers.
+ * Render the editor and drive its handlers, re-rendering after every write the
+ * way a state update would.
+ * @param overrides - prop overrides.
+ * @returns the tree plus interaction helpers and the recorded writes.
  */
-function renderStack(value) {
-  let current = value
-  stackWrites.length = 0
-  const families = CHIP_CALLS
+function renderEditor(overrides = {}) {
+  const familyWrites = []
+  const weightWrites = []
   const instance = mount()
-
-  const render = () =>
-    instance.render(plugin.FamilyStack, {
-      value: current,
-      families,
-      monospace: false,
-      fallback: 'sans-serif',
-      catalogStatus: 'test',
-      add: (next) => {
-        stackWrites.push(next)
-        current = next
-      },
-      addLabel: 'Add font',
-      remove: 'Remove',
-      moveEarlier: 'Earlier',
-      moveLater: 'Later',
-      genericWarning: 'no generic',
-    })
-
+  const props = {
+    value: '"Geist Mono", monospace',
+    weight: 500,
+    catalogue: QUERY_CATALOGUE,
+    styles: QUERY_STYLES,
+    enumerated: true,
+    monospace: true,
+    label: 'font.codeFamily',
+    labels: EDITOR_LABELS,
+    onFamilies: (value) => familyWrites.push(value),
+    onWeight: (weight) => weightWrites.push(weight),
+    ...overrides,
+  }
+  let tree = instance.render(plugin.FontQueryEditor, props)
+  const render = () => {
+    tree = instance.render(plugin.FontQueryEditor, props)
+    return tree
+  }
   const helpers = {
-    tree: render(),
-    /** Re-render and remember the result, for state the component holds. */
-    rerender() {
-      helpers.tree = render()
-      return helpers.tree
+    props,
+    familyWrites,
+    weightWrites,
+    get tree() {
+      return tree
     },
-    /**
-     * Drive one chip action through the stack's own wiring, then re-render.
-     * @param label - `Earlier`, `Later`, or `Remove`.
-     * @param family - the chip's family name.
-     */
-    click(label, family) {
-      // Read the wiring off the rendered chip element, so the test cannot
-      // silently diverge from what the component actually passes down.
-      const chipElement = chipElements(helpers.tree).find(
-        (element) => element.props?.family === family,
-      )
-      assert.ok(chipElement !== undefined, `no chip element for ${family}`)
-      assert.equal(
-        renderChip(family, chipElement.props.index).fire(label),
-        true,
-        `"${label}" is not available for ${family}`,
-      )
-      const { index } = chipElement.props
-      if (label === 'Remove') chipElement.props.onRemove(index)
-      else if (label === 'Earlier') chipElement.props.onMove(index, index - 1)
-      else chipElement.props.onMove(index, index + 1)
-      helpers.tree = render()
-      return stackWrites.at(-1)
+    render,
+    /** The editor's real text surface. */
+    textarea() {
+      const node = collectElements(tree).find((element) => element.type === 'textarea')
+      assert.ok(node !== undefined, 'the editor must render a textarea')
+      return node
     },
-    /** The chips the stack currently holds, in order. */
-    chips() {
-      return chipElements(helpers.tree).map((element) => element.props.family)
-    },
-    /**
-     * Add a family exactly as the combobox's pick handler does, and re-render.
-     * @param family - the family to append.
-     */
-    add(family) {
-      const comboboxElement = collectElements(helpers.tree).find(
-        (element) => typeof element.type === 'function' && element.type.name === 'FamilyCombobox',
+    /** The painted tokens behind the textarea (a space token has no class). */
+    painted() {
+      return collectElements(tree).filter(
+        (element) =>
+          element.type === 'span' &&
+          typeof element.props?.className === 'string' &&
+          (element.props.className === '' || element.props.className.startsWith('dsh-font-q')),
       )
-      assert.ok(comboboxElement !== undefined, 'the stack must render a FamilyCombobox')
-      comboboxElement.props.add(family)
-      helpers.tree = render()
-      return stackWrites.at(-1)
+    },
+    /** The completion rows, in the order the popup shows them. */
+    rows() {
+      return collectElements(tree).filter((element) => element.type === 'li')
+    },
+    type(text, caret) {
+      helpers.textarea().props.onChange({ target: { value: text, selectionStart: caret ?? text.length } })
+      return render()
+    },
+    key(key, extra = {}) {
+      helpers.textarea().props.onKeyDown({ key, preventDefault: () => undefined, ...extra })
+      return render()
+    },
+    focus(caret = 0) {
+      helpers.textarea().props.onFocus({ target: { selectionStart: caret } })
+      return render()
+    },
+    blur() {
+      helpers.textarea().props.onBlur()
+      return render()
     },
   }
-
   return helpers
 }
 
-// Chips reflect the stored string, in order, with quotes stripped.
+// The field shows the stored family and weight as one query, and offers no
+// placeholder: a ghost of the shipped stack in an empty box reads as a value the
+// plugin put there.
 {
-  const stack = renderStack('Inter, "Fira Code", sans-serif')
-  assert.deepEqual(stack.chips(), ['Inter', 'Fira Code', 'sans-serif'])
+  const editor = renderEditor()
+  assert.equal(editor.textarea().props.value, '"Geist Mono" medium, monospace')
+  assert.equal(editor.textarea().props.role, 'combobox')
+  assert.equal(editor.textarea().props.placeholder, undefined)
+  assert.equal(editor.rows().length, 0, 'the popup starts closed')
 }
 
-// Removing a family rewrites the string without it.
+// The painted layer renders exactly the same characters as the field, and marks
+// the family that is in effect.
 {
-  const stack = renderStack('Inter, "Fira Code", sans-serif')
-  assert.equal(stack.click('Remove', 'Fira Code'), 'Inter, sans-serif')
-  assert.deepEqual(stack.chips(), ['Inter', 'sans-serif'])
+  const editor = renderEditor()
+  const painted = editor.painted()
+  assert.equal(painted.map((token) => token.children.join('')).join(''), '"Geist Mono" medium, monospace')
+  assert.match(painted[0].props.className, /dsh-font-qEffective/)
+  assert.equal(painted[0].children.join(''), '"Geist Mono" ')
+  assert.match(painted[1].props.className, /dsh-font-qWeight/)
+  assert.equal(painted[1].children.join(''), 'medium')
+  assert.match(painted.at(-1).props.className, /dsh-font-qGeneric/)
 }
 
-// Reordering is the point of the chips: the first installed family wins, so a
-// move must actually rewrite the order.
+// Focusing opens the browse list; typing narrows it, and the typed text stays
+// available as a custom row because the catalogue is never complete.
 {
-  const stack = renderStack('Inter, "Fira Code", sans-serif')
-  assert.equal(stack.click('Earlier', 'Fira Code'), '"Fira Code", Inter, sans-serif')
-  assert.deepEqual(stack.chips(), ['Fira Code', 'Inter', 'sans-serif'])
-}
-{
-  const stack = renderStack('Inter, "Fira Code", sans-serif')
-  assert.equal(stack.click('Later', 'Inter'), '"Fira Code", Inter, sans-serif')
-}
-
-// Typing filters the catalogue; the chosen family appends to the end of the
-// stack, which is what the combobox's pick handler does.
-{
-  const view = plugin.comboboxView(CHIP_CALLS, 'fira', 0)
-  assert.equal(view.visible[0], 'Fira Code')
-  const stack = renderStack('Inter, sans-serif')
-  assert.equal(stack.add(view.visible[0]), 'Inter, sans-serif, "Fira Code"')
-  assert.deepEqual(stack.chips(), ['Inter', 'sans-serif', 'Fira Code'])
+  const editor = renderEditor({ value: 'monospace', weight: 400 })
+  editor.focus(0)
+  assert.ok(editor.rows().length > 0, 'focus opens the completion list')
+  editor.type('geist', 5)
+  assert.equal(editor.rows().length, 2, 'the one matching family, then the custom row')
+  assert.equal(editor.rows()[0].props.role, 'option')
+  assert.match(editor.rows()[0].props.className, /dsh-font-optionActive/)
+  assert.match(editor.rows()[1].props.className, /dsh-font-optionCustom/)
 }
 
-// ── reordering: the arrows and the drop target share one rule ───────────────
-// `moveItem` is what both paths call, so the two can never disagree about the
-// resulting order.
+// Enter APPLIES; it never completes. Transforming what was typed because Enter
+// was pressed is the one thing this control must not do.
 {
-  const list = ['A', 'B', 'C', 'D']
-  assert.deepEqual(plugin.moveItem(list, 0, 2), ['B', 'C', 'A', 'D'])
-  assert.deepEqual(plugin.moveItem(list, 3, 0), ['D', 'A', 'B', 'C'])
-  assert.deepEqual(plugin.moveItem(list, 1, 1), list, 'a no-op move returns the same reference')
-  // A drag can end past either end of the strip, so the target clamps.
-  assert.deepEqual(plugin.moveItem(list, 1, 99), ['A', 'C', 'D', 'B'])
-  assert.deepEqual(plugin.moveItem(list, 1, -5), ['B', 'A', 'C', 'D'])
-  // An out-of-range source is ignored rather than throwing.
-  assert.equal(plugin.moveItem(list, 9, 0), list)
-  assert.equal(plugin.moveItem(list, -1, 0), list)
-  assert.deepEqual(plugin.moveItem([], 0, 0), [])
-  assert.deepEqual(plugin.moveItem(['only'], 0, 0), ['only'])
+  const editor = renderEditor({ value: 'sans-serif', weight: 400 })
+  editor.focus(0)
+  editor.type('geist', 5)
+  editor.key('Enter')
+  assert.equal(editor.textarea().props.value, 'geist', 'Enter must not rewrite the text')
+  assert.deepEqual(editor.familyWrites, ['geist'], 'the typed name is what gets stored')
 }
 
-// The drop target is decided by which half of the hovered chip the pointer is
-// in — the rule that silently reverses a drag when it is wrong.
+// Tab takes the highlighted completion — an unambiguous request for it — and the
+// entry is replaced with the quoted family.
 {
-  const rect = { left: 100, width: 40 } // midpoint at 120
-  assert.equal(plugin.dropTargetIndex(rect, 101, 2), 2, 'left half drops before')
-  assert.equal(plugin.dropTargetIndex(rect, 119, 2), 2)
-  assert.equal(plugin.dropTargetIndex(rect, 120, 2), 3, 'right half drops after')
-  assert.equal(plugin.dropTargetIndex(rect, 200, 2), 3)
-  // Missing geometry must not move anything.
-  assert.equal(plugin.dropTargetIndex(undefined, 150, 2), 2)
-  assert.equal(plugin.dropTargetIndex(null, 150, 2), 2)
-  assert.equal(plugin.dropTargetIndex({}, 150, 2), 2)
+  const editor = renderEditor({ value: 'sans-serif', weight: 400 })
+  editor.focus(0)
+  editor.type('geist', 5)
+  editor.key('Tab')
+  assert.equal(editor.textarea().props.value, '"Geist Mono", ')
+  assert.deepEqual(editor.familyWrites, ['"Geist Mono"'])
 }
 
-// End to end over the rule the drop handler applies: dropping onto the left
-// half of a chip and onto its right half must produce different orders.
+// Picking a weight writes the weight AND keeps the family: one edit, one place.
 {
-  const list = ['A', 'B', 'C', 'D']
-  const rect = { left: 100, width: 40 }
-  const dropOn = (from, hovered, clientX) => {
-    const target = plugin.dropTargetIndex(rect, clientX, hovered)
-    // The handler removes the dragged item first, so a target past it shifts
-    // back by one; this mirrors that adjustment.
-    return plugin.moveItem(list, from, target > from ? target - 1 : target)
+  const editor = renderEditor({ value: 'monospace', weight: 400 })
+  editor.type('Geist Mono', 10)
+  const rows = editor.rows()
+  assert.equal(rows.length, 4, 'the three faces Geist Mono has, then the family itself')
+  editor.key('ArrowDown')
+  editor.key('Tab')
+  assert.equal(editor.textarea().props.value, '"Geist Mono" medium')
+  assert.deepEqual(editor.familyWrites, ['"Geist Mono"'])
+  assert.deepEqual(editor.weightWrites, [500])
+}
+
+// Picking the SHIPPED weight takes the word away instead of writing it: the row
+// is offered (it is a real choice) but its text is just the family, and the
+// number travels with the row rather than being read back out of the text. The
+// weight the query already states leads its own list, so the pick below is one
+// step from what is written.
+{
+  const editor = renderEditor({ value: 'monospace', weight: 500 })
+  editor.type('Geist Mono medium', 17)
+  editor.key('ArrowDown')
+  editor.key('Tab')
+  assert.equal(editor.textarea().props.value, '"Geist Mono"')
+  assert.deepEqual(editor.weightWrites, [400])
+}
+
+// A typed name the catalogue does not list is taken as it stands: Enter applies
+// it, Tab accepts the custom row (which is the version with the comma).
+{
+  const editor = renderEditor({ value: 'sans-serif', weight: 400, catalogue: [] })
+  editor.type('My Font bold', 11)
+  editor.key('Enter')
+  assert.equal(editor.textarea().props.value, 'My Font bold', 'Enter leaves the text alone')
+  assert.deepEqual(editor.familyWrites, ['"My Font"'])
+  assert.deepEqual(editor.weightWrites, [700])
+}
+{
+  const editor = renderEditor({ value: 'sans-serif', weight: 400, catalogue: [] })
+  editor.type('My Font bold', 11)
+  editor.key('Tab')
+  assert.equal(editor.textarea().props.value, 'My Font bold, ')
+  assert.deepEqual(editor.familyWrites, ['"My Font"'])
+}
+
+// An empty query is an UNFINISHED EDIT, not a value: it writes nothing at all.
+// Refilling the box with the shipped stack — which is what "an empty stack is
+// not a valid CSS value" used to justify — is indistinguishable from a bug to
+// the person who just cleared it.
+{
+  const editor = renderEditor({ value: '', weight: 400 })
+  editor.focus(0)
+  assert.ok(editor.rows().length > 0, 'an empty query browses')
+  editor.key('Enter')
+  assert.deepEqual(editor.familyWrites, [], 'an empty query writes no family')
+  assert.deepEqual(editor.weightWrites, [], 'and no weight')
+  assert.equal(editor.textarea().props.value, '')
+}
+
+// Blur applies what was typed and leaves the text EXACTLY as it is: no quotes
+// added, no word moved, no comma dropped. The stored value is the plugin's
+// serialization of the parse; the box is the user's text, and the two are
+// allowed to differ.
+{
+  const editor = renderEditor({ value: 'sans-serif', weight: 500 })
+  editor.type('geist mono', 10)
+  editor.blur()
+  assert.equal(editor.textarea().props.value, 'geist mono', 'blur must not rewrite the text')
+  assert.equal(editor.familyWrites.at(-1), '"geist mono"')
+  // The query names no weight, so the weight already set is left alone rather
+  // than silently reset.
+  assert.deepEqual(editor.weightWrites, [])
+}
+// A weight the text names IS applied.
+{
+  const editor = renderEditor({ value: 'sans-serif', weight: 500 })
+  editor.type('geist mono medium', 17)
+  editor.blur()
+  assert.equal(editor.textarea().props.value, 'geist mono medium')
+  assert.equal(editor.weightWrites.at(-1), 500)
+}
+// Clearing the box writes NOTHING and stays empty: the saved stack is still the
+// one in use, and the field says so instead of refilling itself with a string
+// from nowhere.
+{
+  const editor = renderEditor()
+  editor.type('', 0)
+  editor.blur()
+  assert.equal(editor.textarea().props.value, '')
+  assert.deepEqual(editor.familyWrites, [])
+  assert.deepEqual(editor.weightWrites, [])
+  const text = []
+  const walk = (node) => {
+    if (typeof node === 'string') text.push(node)
+    else if (Array.isArray(node)) for (const child of node) walk(child)
+    else if (typeof node === 'object' && node !== null) {
+      for (const child of node.children ?? []) walk(child)
+      walk(node.props?.children)
+    }
   }
-  assert.deepEqual(dropOn(3, 1, 105), ['A', 'D', 'B', 'C'], 'D before B')
-  assert.deepEqual(dropOn(3, 1, 135), ['A', 'B', 'D', 'C'], 'D after B')
-  assert.deepEqual(dropOn(0, 2, 105), ['B', 'A', 'C', 'D'], 'A before C')
-  assert.deepEqual(dropOn(0, 2, 135), ['B', 'C', 'A', 'D'], 'A after C')
-  // Dropping an item onto itself in either half changes nothing.
-  assert.deepEqual(dropOn(2, 2, 105), list)
-  assert.deepEqual(dropOn(2, 2, 135), list)
-}
-
-// ── the combobox view: the picker's whole decision ──────────────────────────
-// Tested as a table over the pure function rather than through a faked React
-// runtime, so the assertions are about the behaviour and not about the stub.
-{
-  // An empty query browses the whole catalogue.
-  const browse = plugin.comboboxView(CHIP_CALLS, '', 0)
-  assert.deepEqual(browse.visible, CHIP_CALLS)
-  assert.equal(browse.custom, undefined, 'an empty query offers no custom row')
-
-  // Filtering is case-insensitive and ranks prefix matches first.
-  assert.deepEqual(plugin.comboboxView(CHIP_CALLS, 'fira', 0).visible.slice(0, 2), [
-    'Fira Code',
-    'Fira Sans',
-  ])
-  assert.deepEqual(plugin.comboboxView(CHIP_CALLS, 'FIRA', 0).visible.slice(0, 2), [
-    'Fira Code',
-    'Fira Sans',
-  ])
-  // Whitespace is trimmed before matching.
-  assert.equal(plugin.comboboxView(CHIP_CALLS, '  inter  ', 0).visible[0], 'Inter')
-
-  // A typed family that is not in the catalogue gets a custom row, so a font
-  // the probe missed can still be entered.
-  const custom = plugin.comboboxView(CHIP_CALLS, 'My Font', 0)
-  assert.equal(custom.custom, 'My Font')
-
-  // A typed family that IS in the catalogue must not also offer a custom row,
-  // or the same pick would appear twice.
-  assert.equal(plugin.comboboxView(CHIP_CALLS, 'Inter', 0).custom, undefined)
-  assert.equal(plugin.comboboxView(CHIP_CALLS, 'inter', 0).custom, undefined)
-
-  // The highlight is clamped into range, so a catalogue that shrank under the
-  // cursor cannot index past the end and commit the wrong family.
-  assert.equal(plugin.comboboxView(CHIP_CALLS, 'fira', 99).active, 1)
-  assert.equal(plugin.comboboxView(CHIP_CALLS, 'fira', -5).active, 0)
-  assert.equal(plugin.comboboxView(CHIP_CALLS, 'zzzz', 3).active, 0)
-}
-
-// Removing the only family must not write an empty CSS value.
-{
-  const stack = renderStack('Inter')
-  assert.equal(stack.click('Remove', 'Inter'), 'sans-serif')
-}
-
-// A stack with no generic family warns; one with it does not.
-{
-  const stack = renderStack('Inter, "Fira Code"')
-  const warn = collectElements(stack.tree).find(
-    (element) => element.props?.className === 'dsh-font-warn',
+  walk(editor.tree)
+  assert.ok(
+    text.some((line) => line.includes('font.emptyQuery')),
+    'an unfinished edit is reported, not corrected',
   )
-  assert.ok(warn !== undefined, 'a stack with no generic family must warn')
-}
-{
-  const stack = renderStack('Inter, sans-serif')
-  const warn = collectElements(stack.tree).find(
-    (element) => element.props?.className === 'dsh-font-warn',
+  assert.ok(
+    !text.some((line) => line.includes('font.pending')),
+    'and there is nothing to apply, so no pending line either',
   )
-  assert.equal(warn, undefined, 'a stack ending in a generic family must not warn')
 }
 
-// The stack stamps the drag payload and reads the drop geometry — the two
-// halves of a drag that the chip itself only forwards.
+// The shipped weight is NOT spelled out in the field: nobody chose it, and a
+// `regular` appearing after every interface font reads as junk the plugin
+// injected. It is stated in the line under the field instead, and it comes back
+// the moment a weight is actually chosen.
 {
-  const stack = renderStack('Inter, "Fira Code", sans-serif')
-  const dragged = chipElements(stack.tree)[1]
+  const plain = renderEditor({ value: 'sans-serif', weight: 400, monospace: false })
+  assert.equal(plain.textarea().props.value, 'sans-serif')
+  const text = []
+  const walk = (node) => {
+    if (typeof node === 'string') text.push(node)
+    else if (Array.isArray(node)) for (const child of node) walk(child)
+    else if (typeof node === 'object' && node !== null) {
+      for (const child of node.children ?? []) walk(child)
+      walk(node.props?.children)
+    }
+  }
+  walk(plain.tree)
+  assert.ok(
+    text.some((line) => line.includes('font.codeWeight: w400 400font.weightShipped')),
+    'the shipped weight is reported below the field',
+  )
 
-  // Drag start must set the transfer data, or Firefox never starts a drag.
-  const data = new Map()
-  dragged.props.onDragStart({
-    dataTransfer: { setData: (type, value) => data.set(type, value), effectAllowed: undefined },
-  })
-  assert.equal(data.get('text/plain'), '1', 'the drag must carry the chip index')
-
-  // The same handler marks the chip, so the strip can show it is in flight.
-  stack.rerender()
-  assert.equal(chipElements(stack.tree)[1].props.dragging, true, 'the dragged chip is marked')
-
-  // A drop with no drag in flight must do nothing, or an unrelated drop on the
-  // page would reorder the stack.
-  const before = stackWrites.length
-  chipElements(stack.tree)[0].props.onDrop({
-    preventDefault: () => undefined,
-    clientX: 135,
-    currentTarget: { getBoundingClientRect: () => ({ left: 100, width: 40 }) },
-    dataTransfer: { dropEffect: undefined },
-  })
-  assert.equal(stackWrites.length, before, 'a drop with no drag in flight must do nothing')
-
-  // Releasing clears the mark.
-  chipElements(stack.tree)[1].props.onDragEnd()
-  stack.rerender()
-  assert.equal(chipElements(stack.tree)[1].props.dragging, false, 'drag end clears the mark')
+  const chosen = renderEditor({ value: 'sans-serif', weight: 300, monospace: false })
+  assert.equal(chosen.textarea().props.value, 'sans-serif light')
+  const code = renderEditor({ value: '"Geist Mono", monospace', weight: 400, monospace: true })
+  assert.equal(code.textarea().props.value, '"Geist Mono", monospace')
+  // A weight word left in the stored family string by a hand edit is the weight
+  // field's business, so what is SHOWN is derived from the two values.
+  const legacy = renderEditor({ value: 'Geist Mono medium, monospace', weight: 400, monospace: true })
+  assert.equal(legacy.textarea().props.value, '"Geist Mono", monospace')
 }
 
-// A real drop reorders the stack. This is the end-to-end path: drag chip 0,
-// release over the right half of chip 2, expect it after chip 2.
+// Alt+Arrow moves the entry under the caret, which is the editor's replacement
+// for dragging a chip — and it is a text edit, not a settings write.
 {
-  const stack = renderStack('Inter, "Fira Code", sans-serif')
-  assert.deepEqual(stack.chips(), ['Inter', 'Fira Code', 'sans-serif'])
-
-  chipElements(stack.tree)[0].props.onDragStart({
-    dataTransfer: { setData: () => undefined, effectAllowed: undefined },
-  })
-  stack.rerender()
-
-  // Right half of the third chip (indices 2), so the target is "after it".
-  chipElements(stack.tree)[2].props.onDrop({
-    preventDefault: () => undefined,
-    clientX: 135,
-    currentTarget: { getBoundingClientRect: () => ({ left: 100, width: 40 }) },
-    dataTransfer: { dropEffect: undefined },
-  })
-  stack.rerender()
-
-  assert.equal(stackWrites.at(-1), '"Fira Code", sans-serif, Inter')
-  assert.deepEqual(stack.chips(), ['Fira Code', 'sans-serif', 'Inter'])
+  const editor = renderEditor({ value: 'Inter, monospace', weight: undefined })
+  editor.focus(0)
+  editor.key('ArrowDown', { altKey: true })
+  assert.equal(editor.textarea().props.value, 'monospace, Inter')
+  assert.equal(editor.familyWrites.length, 0)
 }
 
-// Dropping onto the left half of the first chip moves it to the front.
+// Typing at the front of an existing stack inserts EXACTLY the typed characters:
+// no comma is conjured up, nothing is moved. Putting a family in charge is either
+// typed out by the user (comma included) or taken from the completion list, where
+// the pick at a boundary is an explicit request for it.
 {
-  const stack = renderStack('Inter, "Fira Code", sans-serif')
-  chipElements(stack.tree)[2].props.onDragStart({
-    dataTransfer: { setData: () => undefined, effectAllowed: undefined },
-  })
-  stack.rerender()
-  chipElements(stack.tree)[0].props.onDrop({
-    preventDefault: () => undefined,
-    clientX: 105,
-    currentTarget: { getBoundingClientRect: () => ({ left: 100, width: 40 }) },
-    dataTransfer: { dropEffect: undefined },
-  })
-  stack.rerender()
-  assert.deepEqual(stack.chips(), ['sans-serif', 'Inter', 'Fira Code'])
+  const editor = renderEditor({ value: 'sans-serif', weight: 400 })
+  editor.focus(0)
+  editor.type('Isans-serif', 1)
+  assert.equal(editor.textarea().props.value, 'Isans-serif', 'only the typed characters appear')
+  // Putting the comma in is the user's job, and then the name completes as usual.
+  editor.type('I, sans-serif', 12)
+  assert.equal(editor.textarea().props.value, 'I, sans-serif')
+  editor.blur()
+  assert.deepEqual(editor.familyWrites.at(-1), 'I, sans-serif')
+}
+// A pick at the START of a complete family inserts a new entry ahead of it — the
+// one text transformation the user asks for by picking from the list.
+{
+  const editor = renderEditor({ value: 'sans-serif', weight: 400 })
+  editor.type('Inter, sans-serif', 0)
+  assert.equal(editor.rows()[0].props['aria-selected'], true)
+  editor.key('ArrowDown')
+  editor.key('Tab')
+  assert.equal(editor.textarea().props.value, '"Inter Tight", Inter, sans-serif')
 }
 
-console.log('verify-client: family-stack editor verified')
+// Escape closes the list first, and only a second press discards the draft —
+// the standard two-step, so a stray Escape cannot throw away typing.
+{
+  const editor = renderEditor()
+  editor.focus(0)
+  assert.ok(editor.rows().length > 0)
+  editor.key('Escape')
+  assert.equal(editor.rows().length, 0, 'Escape closes the popup')
+  editor.type('Inter', 5)
+  editor.key('Escape')
+  assert.equal(editor.textarea().props.value, 'Inter', 'the first Escape only closes the list')
+  editor.key('Escape')
+  assert.equal(
+    editor.textarea().props.value,
+    '"Geist Mono" medium, monospace',
+    'the second Escape reverts the draft',
+  )
+}
+
+// The row's copy: the weight line, the un-written hint, and one line per
+// diagnostic the query raised.
+{
+  const editor = renderEditor()
+  const text = []
+  const walk = (node) => {
+    if (typeof node === 'string') text.push(node)
+    else if (Array.isArray(node)) for (const child of node) walk(child)
+    else if (typeof node === 'object' && node !== null) {
+      for (const child of node.children ?? []) walk(child)
+      walk(node.props?.children)
+    }
+  }
+  walk(editor.tree)
+  assert.ok(text.some((line) => line.includes('font.codeWeight: w500 500')), 'the applied weight is stated')
+  assert.ok(text.some((line) => line.includes('font-family: "Geist Mono", monospace')), 'and the stack')
+
+  const warned = renderEditor({ value: '"Nope Sans", monospace', weight: 700 })
+  const warnings = collectElements(warned.tree)
+    .filter((element) => element.props?.className === 'dsh-font-warn')
+    .map((element) => String(element.children.join('')))
+  assert.deepEqual(warnings, ['no Nope Sans here'])
+}
+
+// The interface axis is not monospace, and its weight word is its own field.
+{
+  const editor = renderEditor({ monospace: false, weight: 300, value: 'Inter, sans-serif' })
+  assert.equal(editor.tree.props.className, 'dsh-font-query')
+  assert.equal(editor.textarea().props.value, 'Inter light, sans-serif')
+}
 
 // ── apply(ctx) end to end ───────────────────────────────────────────────────
 const themeOverrides = []
@@ -870,7 +1351,10 @@ const ctx = {
     return { dispose: () => undefined }
   },
   on: () => undefined,
-  get: (name) => (name === 'theme' ? { overrideTokens: (source, tokens) => themeOverrides.push({ source, tokens }) } : undefined),
+  get: (name) =>
+    name === 'theme'
+      ? { overrideTokens: (source, tokens) => themeOverrides.push({ source, tokens }) }
+      : undefined,
   locale,
   settingsScope: { bind: (spec) => (assert.equal(spec.namespace, 'ui-font'), scope) },
   slots: {
@@ -893,8 +1377,43 @@ assert.deepEqual(Object.keys(themeOverrides[0].tokens).sort(), ['--ds-font-famil
 assert.equal(themeOverrides[0].tokens['--dsw-font-family'].light, section.uiFontFamily)
 assert.equal(themeOverrides[0].tokens['--dsw-font-family'].dark, section.uiFontFamily)
 
+// The editor's painted layer and its real textarea must share ONE font, and it
+// must not be the user's: a textarea cannot style a substring, so a face with
+// ligatures would draw one glyph in the layer and two in the field, and a
+// synthesized weight would differ between them. Anything that changes a glyph's
+// advance slides the colours off the characters.
+{
+  const rowStyle = appended
+    .map((node) => String(node.textContent ?? ''))
+    .find((css) => css.includes('dsh-font-queryInput'))
+  assert.ok(rowStyle !== undefined, 'the row stylesheet must be installed')
+  const rule = /\.dsh-font-queryLayer,\.dsh-font-queryInput\{([^}]*)\}/.exec(rowStyle)?.[1]
+  assert.ok(rule !== undefined, 'both layers must carry exactly the same font rule')
+  assert.match(rule, /font-family:ui-monospace/)
+  assert.match(rule, /font-weight:400/)
+  assert.match(rule, /font-variant-ligatures:none/)
+  assert.match(rule, /font-feature-settings:"liga" 0/)
+  assert.ok(!rule.includes('--ds-font-family-code'), 'the field must not use the code font')
+  assert.ok(!rule.includes('--dsw-font-family'), 'nor the interface font')
+  assert.ok(
+    !/\.dsh-font-queryCode/.test(rowStyle),
+    'no per-axis font rule may exist for the field',
+  )
+}
+
 assert.equal(dictionaries.length, 1)
 assert.deepEqual(Object.keys(dictionaries[0].dict.zh).sort(), Object.keys(dictionaries[0].dict.en).sort())
+for (const key of [
+  'font.suggestions',
+  'font.pending',
+  'font.diag.unknownFamily',
+  'font.diag.missingWeight',
+  'font.diag.duplicateWeight',
+  'font.diag.unclosedQuote',
+  'font.diag.trailingText',
+]) {
+  assert.ok(key in dictionaries[0].dict.zh, `the dictionary is missing ${key}`)
+}
 
 assert.equal(registeredSlots.length, 1)
 const [{ options, component }] = registeredSlots
@@ -909,12 +1428,22 @@ const actions = options.inject(options.store.create())
 assert.equal(typeof actions.setField, 'function')
 assert.equal(typeof actions.reset, 'function')
 
+/** Render the row with `setField` recorded. */
+function renderRow() {
+  const writes = []
+  const row = component({
+    t: (key) => key,
+    useStore: (selector) => selector(options.store.getSnapshot()),
+    setField: (field, value) => {
+      writes.push([field, value])
+    },
+    reset: () => undefined,
+  })
+  return { row, writes }
+}
+
 // The component must render a tree containing the localized labels.
-const rendered = component({
-  t: (key) => key,
-  useStore: (selector) => selector(options.store.getSnapshot()),
-  ...actions,
-})
+const { row: rendered, writes } = renderRow()
 const labels = []
 const collect = (node) => {
   if (node === null || node === undefined) return
@@ -925,8 +1454,6 @@ const collect = (node) => {
   if (typeof node !== 'object') return
   const children = Array.isArray(node.children) ? node.children : [node.children]
   for (const child of children) collect(child)
-  // `Field` and `SliderControl` carry their copy in props, because the stubs
-  // above do not render function components.
   collect(node.props?.children)
   for (const key of ['label', 'value', 'hint', 'ariaLabel', 'placeholder']) {
     collect(node.props?.[key])
@@ -943,6 +1470,98 @@ for (const key of [
   'font.reset',
 ]) {
   assert.ok(labels.includes(key), `rendered row is missing ${key}`)
+}
+
+// The catalogue's provenance is announced once, and only when it is bad news:
+// an enumerated list is the machine's own and needs no badge, while the probe
+// fallback is a short curated list the popup can never complete. Discovery that
+// has not answered yet says nothing either, so no caveat flashes and vanishes.
+{
+  const text = (node, out = []) => {
+    if (typeof node === 'string' || typeof node === 'number') out.push(String(node))
+    else if (Array.isArray(node)) for (const child of node) text(child, out)
+    else if (typeof node === 'object' && node !== null) {
+      for (const child of node.children ?? []) text(child, out)
+      text(node.props?.children, out)
+    }
+    return out
+  }
+  // The row's first state slot is its catalogue; seeding it is how the verifier
+  // reaches the two discovery outcomes without a React runtime.
+  const notice = (catalog) => {
+    react.__slots = [catalog]
+    react.__hookIndex = 0
+    return text(
+      component({
+        t: (key) => key,
+        useStore: (selector) => selector(options.store.getSnapshot()),
+        setField: () => undefined,
+        reset: () => undefined,
+      }),
+    ).join('|')
+  }
+  assert.match(
+    notice({ families: [], styles: {}, enumerated: false, measured: true }),
+    /font\.catalogProbed/,
+    'the probe fallback must be called out',
+  )
+  assert.doesNotMatch(
+    notice({ families: [], styles: {}, enumerated: true, measured: true }),
+    /font\.catalogProbed/,
+    'a machine read needs no badge',
+  )
+  assert.doesNotMatch(
+    notice({ families: [], styles: {}, enumerated: false }),
+    /font\.catalogProbed/,
+    'discovery still running must say nothing',
+  )
+  react.__slots = undefined
+  react.__hookIndex = 0
+}
+
+// The row owns the wiring: one query editor per axis, each writing its own
+// family and weight fields, and each holding the copy for its axis.
+{
+  const editors = collectElements(rendered).filter(
+    (element) => typeof element.type === 'function' && element.type.name === 'FontQueryEditor',
+  )
+  assert.equal(editors.length, 2, 'one editor per axis')
+
+  const [ui, code] = editors
+  assert.equal(ui.props.value, section.uiFontFamily)
+  assert.equal(ui.props.weight, 400, 'the shipped interface weight')
+  assert.equal(ui.props.monospace, undefined)
+  assert.equal(ui.props.labels.weightLine, 'font.uiWeight')
+  assert.equal(ui.props.label, 'font.uiFamily')
+
+  assert.equal(code.props.value, section.codeFontFamily)
+  assert.equal(code.props.weight, section.codeFontWeight)
+  assert.equal(code.props.monospace, true)
+  assert.equal(code.props.labels.weightLine, 'font.codeWeight')
+  assert.equal(code.props.labels.weightName(500), 'font.weight.medium')
+
+  ui.props.onFamilies('Inter Tight, sans-serif')
+  ui.props.onWeight(300)
+  code.props.onFamilies('"Geist Mono", monospace')
+  code.props.onWeight(700)
+  assert.deepEqual(writes, [
+    ['uiFontFamily', 'Inter Tight, sans-serif'],
+    ['uiFontWeight', 300],
+    ['codeFontFamily', '"Geist Mono", monospace'],
+    ['codeFontWeight', 700],
+  ])
+
+  // A commit that resolves to the stored value must not write at all: the
+  // settings document is durable, and a no-op round trip is still a write.
+  ui.props.onFamilies(section.uiFontFamily)
+  ui.props.onWeight(400)
+  code.props.onFamilies(section.codeFontFamily)
+  code.props.onWeight(section.codeFontWeight)
+  assert.equal(writes.length, 4, 'an unchanged commit must not write')
+
+  // Both axes share the machine's catalogue, faces included.
+  assert.equal(ui.props.styles, code.props.styles)
+  assert.ok(Array.isArray(code.props.catalogue))
 }
 
 // A pushed settings change must repaint.

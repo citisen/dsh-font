@@ -3,7 +3,7 @@
 English | [中文](README.zh.md)
 
 Customize the DeepSeek Harness **Web GUI fonts** from Settings: the interface
-font family, the code font family, and three independent size axes.
+and code font stacks (each with its weight) and three independent size axes.
 
 This is a third-party [dsh](https://github.com/deepseek-ai/deepseek-harness)
 profile bundle. It ships as one dual-face package: a Node half that owns a
@@ -16,31 +16,166 @@ are present in the `latest` and `next` release channels.
 
 ## What it adds
 
-A **Fonts** row in *Settings → General*, with five controls:
+A **Fonts** row in *Settings → General*, with five fields: two font queries and
+three size axes.
 
-| Control | Effect | Range |
+| Field | Effect | Value |
 | --- | --- | --- |
-| Interface font | `--dsw-font-family` — all non-code UI text | any CSS `font-family` list |
-| Code font | `--ds-font-family-code` — code blocks, inline code, monospace | any CSS `font-family` list |
+| Interface font | `--dsw-font-family` — all non-code UI text | a font query: families, optionally with a weight |
+| Code font | `--ds-font-family-code` — code blocks, inline code, monospace | a font query |
 | Interface text size | Scales every hard-coded UI text size | 75% – 150%, step 5% |
 | Conversation text size | Message bodies, headings, and tables | 12 – 20 px |
 | Code text size | Code blocks and inline code | 10 – 20 px |
 
-Both family fields are **multi-select font stacks**: each chosen family is a chip
-in priority order, with a search box that autocompletes against the fonts
-actually on your machine. Chips can be reordered or removed, and any family name
-can still be typed by hand. Every value is saved through the host settings
-document (`$DSH_HOME/settings.yaml`, namespace `ui-font`), so settings survive a
-restart and are shared by every browser pointed at the same host.
+Both font fields are **editors for a small font-query language**, not plain text
+inputs: the whole stack is one piece of text you edit directly, with syntax
+colouring, soft wrapping, and a completion list built from the fonts actually on
+your machine. The weight is written *in* the query, next to the family it belongs
+to, so changing a font and its weight is one edit in one place:
+
+```
+Geist Mono medium, "Zhuque Fangsong (technical preview)", monospace
+└─────┬────┘ └──┬─┘
+    family    weight
+```
+
+- **Order is the text's order.** The first family the browser can resolve wins,
+  and reordering is an edit: cut and paste it, or put the caret in an entry and
+  press <kbd>Alt</kbd>+<kbd>↑</kbd>/<kbd>↓</kbd>. There are no chips to drag.
+- **The text belongs to you.** Nothing rewrites it: not quoting, not reordering,
+  not tidying, and not refilling an empty box. A new font goes exactly where the
+  caret is, because that is where you typed it — putting one in front of the
+  stack is `Inter, ` typed by hand, or a pick from the completion list at the
+  start of an entry.
+- **The list knows your fonts.** It completes family names, the generic keywords,
+  and — once a family is named — the weights *that family has*, read off its
+  faces. Any name can still be typed by hand; the catalogue is never presented as
+  complete.
+- **The box is always the same monospace.** The painted layer and the real
+  textarea share one box, and a textarea cannot style a substring, so the field
+  uses one fixed system monospace at weight 400 with ligatures and kerning turned
+  off — whatever font the query names. A face with ligatures (`->` in Fira Code)
+  would draw one glyph in the layer and two in the field, and a synthesized
+  weight would differ between them. The readout line under the field is rendered
+  in the axis's own font, so the family you picked is still visible there.
+- **Enter applies, it never completes.** The query is parsed and written on
+  <kbd>Enter</kbd> or when you leave the field; <kbd>Tab</kbd> (or a click) takes
+  the highlighted completion, which is the one case where the text is replaced —
+  because that is what picking a suggestion means.
+- **A wrong query is marked, not fixed.** A family this machine does not have, a
+  weight the family lacks, an unclosed quote, a stray word: each is reported
+  under the field, in warning or error colour, and the text is left as typed. An
+  empty box writes nothing at all and says so — the saved stack stays in use, and
+  *Reset to defaults* is how you go back to the shipped one.
+
+Every value is saved through the host settings document
+(`$DSH_HOME/settings.yaml`, namespace `ui-font`), so settings survive a restart
+and are shared by every browser pointed at the same host.
 
 The *Interface text size* and *Conversation text size* axes are independent on
 purpose: bumping the interface makes the surrounding chrome easier to read
 without changing how much message text fits on screen, and vice versa.
 
+### Choosing a weight: `Geist Mono medium`
+
+CSS cannot put a weight in a `font-family` — `font-family: "Geist Mono" 500,
+monospace` is simply an invalid declaration, and the whole stack would be
+dropped. The query language therefore writes the weight as a word beside the
+family, and the plugin reads the pair back into the two declarations that
+actually apply:
+
+```
+Geist Mono medium, monospace   →   font-family: "Geist Mono", monospace
+                               →   font-weight: 500
+```
+
+`Thin`, `ExtraLight`, `Light`, `Book`, `Regular`, `Medium`, `SemiBold`, `Bold`,
+`ExtraBold`, `Black` and their usual aliases (`Hairline`, `DemiBold`,
+`UltraBold`, …) are all recognized, case-insensitively. The weight belongs to the
+axis rather than to one family, so it is honoured wherever it is written and
+counted once; the canonical form puts it after the first family — the one in
+effect.
+
+The **shipped weight is implicit**: an axis at its factory 400 carries no word at
+all, because a `regular` that appears after every family is noise nobody asked
+for — and for the interface axis 400 literally means "no override". A word
+appears exactly when a weight is chosen, and deleting it returns the axis to 400.
+What the axis currently stands at is always stated in the line under the field
+(`Interface weight: Regular 400 (shipped, not overridden)`), so nothing is hidden
+by leaving the word out.
+
+The weight is a closed list rather than a free number, because a `font-weight`
+the chosen family does not have is *synthesized* by the browser, and offering
+faux-bold as a normal choice is worse than not offering it. When the faces could
+be read — the Local Font Access API reports them — the popup offers *that*
+family's weights, and a weight the family lacks is called out below the field:
+
+> Geist Mono has no 700 face on this machine (bold), so the browser will
+> synthesize it
+
+Deleting the word does not quietly reset anything: the axis keeps the weight it
+was set to, the line under the field states it, and the word comes back the next
+time the row is built from the stored values. To go back to the shipped weight,
+pick its row from the list (`Regular 400`) — a pick is an instruction, so it sets
+the value even though its text is just the family name.
+
+One deliberate escape hatch: if what you type is itself a family on your machine,
+the trailing word is read as part of the name. `Book Antiqua` and
+`Franklin Gothic Medium` are real families, and applying a weight to them instead
+of picking them would be silent misbehaviour. The price is that a name which is
+genuinely both — a family literally called `Geist Mono Medium` — is also read as
+a name. The catalogue decides, so the judgement uses the same font list the
+completion list shows you. Quoting is the way out: `"Book Antiqua"` always means
+the name, verbatim.
+
+### The interface weight is opt-in
+
+The code surface has no weight hierarchy to preserve, so its weight is simply the
+one written in the query. The interface does have one: headings are 700, table
+heads 500, body 400. Setting an interface weight therefore moves the base and
+carries the heading steps with it, keeping each step's shipped distance from 400
+instead of flattening them:
+
+```css
+/* --dsh-font-ui-weight: 500 */
+html body { font-weight: 500 }
+--dsh-font-markdown-base: 500 …          /* body text */
+--dsh-font-markdown-h1: 800 …            /* 700 + (500 - 400) */
+--dsh-font-markdown-table-head: 600 …    /* 500 + (500 - 400) */
+```
+
+Text that *inherits* its weight moves; a label or a button whose weight the
+design system fixes keeps it, because its own rule still wins. And the shipped
+400 emits **no rule at all**, so an untouched install paints exactly what the
+design system paints.
+
+### The query language
+
+```
+query  := entry ("," entry)*
+entry  := family | weight
+family := '"' … '"' | "'" … "'" | word (space word)*
+weight := thin | extralight | light | book | regular | roman | medium |
+          demibold | semibold | bold | extrabold | black | heavy | …
+```
+
+The grammar is the CSS `font-family` list plus the one thing the list cannot
+carry. Only the LAST word of an unquoted entry may be a weight, and only when the
+whole entry is not itself a catalogued family. A bare weight word (`medium`) sets
+the axis weight without naming a family. Commas inside quotes are not separators,
+so `"Foo, Bar"` is one family.
+
+The reader is forgiving on purpose — this text is typed by hand, not generated —
+so anything it cannot place is kept as written and reported under the field
+instead of being dropped: an unclosed quote, a stray word after a quoted name, a
+weight written twice, a family the machine does not list, a weight the family has
+no face for. The field also names the family that is in effect, which is the
+first one the browser can actually resolve.
+
 ### How the font list is discovered
 
 Order matters in a CSS font stack — the first installed family wins — so the
-picker is built around that rather than around a single text field.
+editor is built around the text rather than around a picker.
 
 Reading the real installed-font list needs the
 [Local Font Access API](https://developer.mozilla.org/en-US/docs/Web/API/Local_Font_Access_API)
@@ -48,25 +183,29 @@ Reading the real installed-font list needs the
 permission-gated**; MDN also notes browsers are not obliged to return the
 complete list. So the catalogue is layered:
 
-1. **`queryLocalFonts()`** when the browser offers it — the row then reports
-   *Read from this machine*. The first use shows a permission prompt; declining
-   falls back silently rather than erroring.
+1. **`queryLocalFonts()`** when the browser offers it — the machine's own list,
+   which needs no badge to explain itself. Its per-face `style` names (`Regular`,
+   `SemiBold`, `Bold Italic`) are kept alongside the families, which is what lets
+   the completion list offer a family's real weights and warn about one it lacks.
+   The first use shows a permission prompt; declining falls back silently rather
+   than erroring.
 2. **Measurement probing** everywhere else — each candidate family is rendered
    off-screen and compared against a `monospace` baseline; a different width or
-   height means it is installed. No permission needed, works in every browser,
-   and the row reports *Common fonts detected by probing*. It only sees the
-   curated probe list, so it under-reports by design.
+   height means it is installed. No permission needed, works in every browser.
+   It only sees the curated probe list, so it under-reports by design and can say
+   nothing about weights — which is the one case worth calling out, so the row
+   then says so once, above the fields, and adds that any family can still be
+   typed.
 3. **Always** the curated catalogue plus the generic families, so a font that
-   neither source found can still be typed and added.
+   neither source found can still be typed.
 
 The result is cached for the session, and discovery only runs when the row is
 actually rendered — never at startup.
 
-The picker also warns when a stack has **no generic family at the end** (such as
-`sans-serif`), because a missing font then falls back unpredictably. Note that
-quoting is automatic: `Fira Code` is stored as `"Fira Code"` and generic
-keywords are deliberately left unquoted, so `"sans-serif"` can never be written
-by accident.
+The editor also warns when a query has **no generic family at the end** (such as
+`sans-serif`), because a missing font then falls back unpredictably. Quoting is
+automatic: `Fira Code` is stored as `"Fira Code"`, and generic keywords are
+deliberately left unquoted, so `"sans-serif"` can never be written by accident.
 
 ## Install
 
@@ -195,10 +334,56 @@ theme change; the plugin re-asserts its own on every settings change. The row's
 help text tells the user this control wins over the *Font size* row in
 Appearance.
 
+### Where the code weight is written
+
+The design system has **no** weight token at all — every `font:` declaration in
+the interface is a literal, and the code ladder is literally `400`. So the
+weight cannot ride the family token the way a family does, and it is applied on
+two levels:
+
+```css
+/* the three code tokens carry it in their font: shorthand … */
+--dsw-font-markdown-code: var(--dsh-font-code-weight,400) var(--dsh-font-code-size,12px) / … ;
+
+/* … and everything styled directly with the code family is matched structurally */
+html body pre, html body code, html body [class*="code" i] {
+  font-family: var(--ds-font-family-code) !important;
+  font-weight: var(--dsh-font-code-weight,400) !important;
+}
+```
+
+The second rule exists because most code in the interface never reads a token:
+the tool I/O cards and the terminal output are styled with `font-family:
+var(--ds-font-family-code)` and their own literal weight inside a component
+stylesheet, so there is nothing to override but the element. The `!important` is
+what outranks `font: 500 12px/18px …`. It is deliberately **not** a universal
+rule: the surrounding labels keep the shipped hierarchy.
+
+### Where the interface weight is written
+
+The interface weight is opt-in, so the shipped `400` emits no rule at all and an
+untouched install paints exactly what the design system paints. Anything else is
+written on two levels:
+
+```css
+/* text that inherits its weight moves as a whole … */
+html body { font-weight: 500 }
+
+/* … while the Markdown ladder the plugin already owns is shifted by the same
+   distance from the shipped 400, so headings keep their contrast */
+--dsh-font-markdown-base: 500 …
+--dsh-font-markdown-h1: 800 …            /* 700 + (500 - 400) */
+--dsh-font-markdown-table-head: 600 …    /* 500 + (500 - 400) */
+```
+
+The ladder has to name the weight explicitly: a `font:` shorthand with no weight
+component resets `font-weight` to `normal`, so `html body` alone would be
+cancelled by the plugin's own tokens.
+
 ### Pre-paint
 
 The Node half answers `webserver/index-inject` with an inline `<script>` that
-installs the stylesheet and sets the two family variables before the shell
+installs the stylesheet and sets the family and weight variables before the shell
 mounts, so the first frame is already in the user's fonts. It reads the same
 `ui-font` settings section at render time, and falls back to the schema defaults
 when the settings provider is absent.
@@ -283,6 +468,32 @@ arrangement does and does not protect against.
 - **Per-element stamping is proportional to the DOM.** The scale pass measures
   each element once and caches the result, and re-stamps on mutation, so it is
   bounded — but it is not free on a very large transcript.
+- **The code weight is not a per-surface choice.** It applies to every code
+  surface at once, and where it lands on `pre`, `code`, and any element with
+  `code` in its class name — so a `font-weight` a component sets inside a code
+  block (syntax highlighting, a bold diff line) is overridden too. The interface
+  weight is the mirror image: only text that *inherits* its weight moves, and a
+  label or button whose weight the design system fixes keeps it. A weight the
+  family lacks is still synthesized by the browser; the closed list and the
+  "no such face on this machine" warning only keep it out of reach.
+- **The query language is a convention, not CSS.** It lives only in this row's
+  two font fields; what is stored is still a valid CSS `font-family` list plus a
+  numeric `font-weight`, so disabling the plugin leaves nothing behind. Whether a
+  trailing word is a weight or part of the name is decided by the loaded
+  catalogue, so a family whose real name ends in a weight word (`Book Antiqua`,
+  `Franklin Gothic Medium`) is left intact only when that exact name was
+  discovered — both are curated, so this normally holds, but a name outside the
+  probe list can be split when the Local Font Access prompt is declined. Quoting
+  settles it: `"Book Antiqua"` is always the name.
+- **The heading shift is one formula, not a redesign.** Each step becomes
+  `shipped + (interface weight - 400)`, clamped at 900 — so an interface weight
+  of 900 flattens the ladder against that ceiling.
+- **The box is not a copy of the setting.** What is stored is the plugin's
+  serialization of the query (quoted, weight word after the first family); what
+  the box shows is your text, kept verbatim for as long as the row lives. A
+  reload rebuilds the box from the two stored values, so a weight word you
+  deleted can reappear there, and it may be spelled differently from what you
+  typed.
 - **The settings row is English/Chinese only**, matching the shipped locale pair.
 
 ## License
