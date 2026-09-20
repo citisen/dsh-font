@@ -65,6 +65,9 @@ const {
   FontSettingsSchema,
   DEFAULT_UI_FONT_FAMILY,
   DEFAULT_CODE_FONT_FAMILY,
+  DEFAULT_CODE_FONT_WEIGHT,
+  DEFAULT_UI_FONT_WEIGHT,
+  FONT_WEIGHTS,
   FONT_STYLE_ID,
   fontStyleSheet,
   fontBootstrapScript,
@@ -79,28 +82,61 @@ assert.equal(FONT_SETTINGS_NAMESPACE, 'ui-font')
 const defaults = FontSettingsSchema({})
 assert.equal(defaults.uiFontFamily, DEFAULT_UI_FONT_FAMILY)
 assert.equal(defaults.codeFontFamily, DEFAULT_CODE_FONT_FAMILY)
+assert.equal(defaults.codeFontWeight, DEFAULT_CODE_FONT_WEIGHT)
+assert.equal(defaults.uiFontWeight, DEFAULT_UI_FONT_WEIGHT)
+assert.equal(DEFAULT_UI_FONT_WEIGHT, 400, 'the shipped interface weight is the design system base')
 assert.equal(defaults.uiFontScale, 1)
 assert.equal(defaults.contentFontSize, 14)
 assert.equal(defaults.codeFontSize, 12)
+
+// The weight is a closed vocabulary, not a free number: a weight no family is
+// guaranteed to have would be synthesized by the browser (faux-bold), so it
+// must be rejected at the wire boundary rather than painted.
+assert.deepEqual(FONT_WEIGHTS, [100, 200, 300, 400, 500, 600, 700, 800, 900])
+for (const weight of FONT_WEIGHTS) {
+  assert.equal(FontSettingsSchema({ codeFontWeight: weight }).codeFontWeight, weight)
+  assert.equal(FontSettingsSchema({ uiFontWeight: weight }).uiFontWeight, weight)
+}
+assert.throws(() => FontSettingsSchema({ codeFontWeight: 550 }))
+assert.throws(() => FontSettingsSchema({ codeFontWeight: 0 }))
+assert.throws(() => FontSettingsSchema({ codeFontWeight: '500' }))
+assert.throws(() => FontSettingsSchema({ uiFontWeight: 550 }))
+assert.throws(() => FontSettingsSchema({ uiFontWeight: 'medium' }))
 
 // Out-of-range values must be rejected at the wire boundary.
 assert.throws(() => FontSettingsSchema({ contentFontSize: 99 }))
 assert.throws(() => FontSettingsSchema({ uiFontScale: 0.1 }))
 
 // The pre-paint sheet carries the scale and both size axes, one rule per
-// hard-coded UI text step.
+// hard-coded UI text step — and the code weight, which the design system has no
+// token of its own for.
 const sheet = fontStyleSheet(defaults)
 assert.match(sheet, /--dsh-font-ui-scale:1;/)
 assert.match(sheet, /--dsh-font-content-size:14px/)
 assert.match(sheet, /--dsh-font-code-size:12px/)
+assert.match(sheet, /--dsh-font-code-weight:400;/)
 assert.match(sheet, /font-size:calc\(14px \* var\(--dsh-font-ui-scale,1\)\) !important/)
 for (const step of [11, 12, 13, 14, 16, 20, 24]) {
   assert.ok(sheet.includes(`calc(${String(step)}px * `), `missing scale rule for ${String(step)}px`)
 }
 
+// The interface weight is opted into: the shipped 400 emits no rule at all, so
+// a default install's first frame is exactly what the design system paints.
+assert.ok(
+  !/font-weight:/.test(sheet),
+  'the shipped interface weight must not emit a weight rule',
+)
+const heavy = fontStyleSheet({ ...defaults, uiFontWeight: 500 })
+assert.match(heavy, /html body\{font-weight:500\}/)
+
 const script = fontBootstrapScript(defaults)
 assert.ok(script.includes(JSON.stringify(FONT_STYLE_ID)), 'bootstrap must key on the stylesheet id')
 assert.ok(!script.includes('</script'), 'bootstrap must not close its own script element')
+assert.ok(!script.includes('font-weight'), 'the default bootstrap must carry no weight rule')
+assert.ok(
+  fontBootstrapScript({ ...defaults, uiFontWeight: 500 }).includes('font-weight:500'),
+  'a set interface weight must reach the pre-paint bootstrap',
+)
 
 // Execute the bootstrap against a DOM stub and read back what it wrote.
 const appended = []
@@ -133,12 +169,21 @@ assert.match(created[0].textContent, /--dsh-font-ui-scale:1;/)
 assert.equal(appended.length, 1)
 assert.equal(rootStyle.get('--dsw-font-family'), DEFAULT_UI_FONT_FAMILY)
 assert.equal(rootStyle.get('--ds-font-family-code'), DEFAULT_CODE_FONT_FAMILY)
+assert.equal(rootStyle.get('--dsh-font-code-weight'), '400')
 delete globalThis.document
 
 // A non-default section must flow through both the sheet and the script.
-const custom = { ...defaults, uiFontScale: 1.25, contentFontSize: 16, codeFontSize: 13 }
+const custom = {
+  ...defaults,
+  uiFontScale: 1.25,
+  contentFontSize: 16,
+  codeFontSize: 13,
+  codeFontWeight: 500,
+}
 assert.match(fontStyleSheet(custom), /--dsh-font-content-size:16px/)
+assert.match(fontStyleSheet(custom), /--dsh-font-code-weight:500;/)
 assert.match(fontStyleSheet(custom), /font-size:calc\(16px \* var\(--dsh-font-ui-scale,1\)\)/)
+assert.ok(fontBootstrapScript(custom).includes('--dsh-font-code-weight'))
 
 const injection = fontInjection(defaults)
 assert.equal(injection.kind, 'script')

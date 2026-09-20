@@ -4,8 +4,10 @@ The runbook for changing the plugin and getting it to users. For the *why*
 behind the setup (and what it does not protect against), see
 [PUBLISHING.md](PUBLISHING.md).
 
-The next version to ship is **0.1.2** — the current published `latest` is
-`0.1.0`, and `0.1.1` is staged but not yet approved.
+The next version to ship is **0.2.0** — the current published `latest` is
+`0.1.0`. `0.1.1` was staged from an earlier change and never approved; it should
+be **rejected** rather than approved, because approving it would publish it under
+`latest` and move the tag backwards.
 
 ## The short version
 
@@ -17,7 +19,7 @@ npm run build
 npm run check:all
 
 # 3. bump the version
-npm version patch --no-git-tag-version
+npm version patch --no-git-tag-version   # or minor / major
 
 # 4. land it through a PR (main is protected — direct pushes are rejected)
 git checkout -b fix/whatever
@@ -27,8 +29,8 @@ gh pr create --fill && gh pr merge --squash --delete-branch
 
 # 5. tag the merged commit, then stage
 git checkout main && git pull --ff-only
-git tag v0.1.2 && git push origin v0.1.2
-gh workflow run stage.yml --ref main -f dist-tag=latest -f confirm=0.1.2
+git tag v0.2.0 && git push origin v0.2.0
+gh workflow run stage.yml --ref main -f dist-tag=latest -f confirm=0.2.0
 
 # 6. review, then approve (this is the only step that publishes)
 npm run release -- view <stage-id>
@@ -95,8 +97,8 @@ or rebase rather than merge-commit.
 ### 5. Tag, then stage
 
 ```sh
-git tag v0.1.2 && git push origin v0.1.2
-gh workflow run stage.yml --ref main -f dist-tag=latest -f confirm=0.1.2
+git tag v0.2.0 && git push origin v0.2.0
+gh workflow run stage.yml --ref main -f dist-tag=latest -f confirm=0.2.0
 ```
 
 The `confirm` input must equal `package.json`'s version exactly — it exists to
