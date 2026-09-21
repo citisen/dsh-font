@@ -933,6 +933,114 @@ assert.deepEqual(paint('Geist Mono medium, "Foo, Bar", monospace', GRAMMAR_FOO),
   )
 }
 
+// The OTHER quotation mark, which is the same query. `'Geist Mono'` reads as the
+// family `Geist Mono` — the parser accepts either mark, and the family-list reader
+// has always handled both — so it has to reach the same rows. It did not: the
+// filter text was written with the serializer's `"`, and a needle carrying a `'`
+// matched no subject at all, so every single-quoted entry offered an empty list.
+// That is the reported regression one spelling further out, and the assertions
+// below are written against the bare spelling rather than against a written-out
+// list, because agreeing with it is the property that matters.
+{
+  const rowsOf = (text) =>
+    complete(look(text, GRAMMAR), GRAMMAR, {
+      text,
+      caret: text.length,
+      trigger: 'explicit',
+    })
+  const single = rowsOf("'Geist Mono' medium")
+  assert.ok(single.rows.length > 0, 'a single-quoted entry must not offer an empty list')
+  assert.deepEqual(
+    single.rows.map((row) => row.item.kind),
+    rowsOf('Geist Mono medium').rows.map((row) => row.item.kind),
+    'both quotation marks spell one query and must offer its slots',
+  )
+  assert.equal(single.rows[0].item.insert, '"Geist Mono" medium')
+  assert.ok(
+    !single.rows.some((row) => row.item.kind === 'custom'),
+    'a single-quoted family the catalogue has is not an "as typed" name',
+  )
+  // The weight slot, where the empty list used to cost the most: the row completes
+  // the family's real face, and the replacement is written over the whole entry —
+  // the quote style included, because the plugin writes canonical `"` itself.
+  const slot = rowsOf("'Geist Mono' b")
+  assert.deepEqual(
+    slot.rows.map((row) => row.item.kind),
+    ['weight'],
+    'a single-quoted family reaches its weights like a double-quoted one',
+  )
+  assert.equal(slot.rows[0].item.insert, '"Geist Mono" bold')
+  assert.equal(
+    applyCompletion("'Geist Mono' b", slot.range, slot.rows[0].item).text,
+    '"Geist Mono" bold',
+  )
+  // A family the serializer would leave UNQUOTED is the case the serializer's rule
+  // got wrong twice over: `quoteFamily('Inter')` is `Inter`, so a subject written
+  // with it stayed bare inside a quoted entry and matched nothing at all. The
+  // entry's own mark is what makes this reachable — and it agrees with bare.
+  assert.deepEqual(
+    rowsOf("'Inter' regular").rows.map((row) => [row.item.kind, row.item.insert]),
+    rowsOf('Inter regular').rows.map((row) => [row.item.kind, row.item.insert]),
+    'a quoted single-word family offers what its bare spelling offers',
+  )
+  // An unclosed single quote is the same story as an unclosed double one: the
+  // reader salvaged a name it cannot vouch for, so nothing may be completed as a
+  // weight against it and the text as typed is the only row left.
+  assert.deepEqual(
+    rowsOf("'Geist Mono b").rows.map((row) => row.item.kind),
+    ['custom'],
+    'an unclosed single quote offers no weights either',
+  )
+}
+
+// The range a pick replaces is recomputed from the caret on every filter, and it is
+// the whole ENTRY rather than the word being typed. Both halves matter: a range
+// held over from the filter that opened the list would leave debris behind the
+// insert, and one that covered only the typed letters would leave the tail of the
+// weight word behind — `"Geist Mono" bo` has to become `"Geist Mono" bold`, never
+// `"Geist Mono" boldo`.
+{
+  const text = '"Geist Mono" bo'
+  const found = complete(look(text, GRAMMAR), GRAMMAR, {
+    text,
+    caret: text.length,
+    trigger: 'explicit',
+  })
+  assert.equal(found.rows[0].item.insert, '"Geist Mono" bold')
+  assert.deepEqual(
+    found.range,
+    { from: 0, to: text.length },
+    'the range is the entry, not the word under the caret',
+  )
+  const applied = applyCompletion(text, found.range, found.rows[0].item)
+  assert.deepEqual([applied.text, applied.caret], ['"Geist Mono" bold', 17])
+  // Reported as the range that changed rather than as a whole-document assignment,
+  // which is what keeps the browser's undo stack intact.
+  assert.deepEqual([applied.from, applied.to, applied.insert], [0, 15, '"Geist Mono" bold'])
+  // One document, two carets: the range follows the caret rather than being held
+  // over from an earlier filter.
+  const document = '"Geist Mono", monospace'
+  const rangeAt = (caret) =>
+    complete(look(document, GRAMMAR), GRAMMAR, { text: document, caret, trigger: 'explicit' })
+      .range
+  assert.deepEqual([rangeAt(0), rangeAt(14)], [
+    { from: 0, to: 12 },
+    { from: 14, to: 23 },
+  ])
+  // And only the caret's entry is rewritten: the fallback after the comma survives
+  // a pick at the entry before it.
+  const stack = '"Geist Mono" bold, monospace'
+  const inStack = complete(look(stack, GRAMMAR), GRAMMAR, {
+    text: stack,
+    caret: 17,
+    trigger: 'explicit',
+  })
+  assert.equal(
+    applyCompletion(stack, inStack.range, inStack.rows[0].item).text,
+    '"Geist Mono" bold, monospace',
+  )
+}
+
 // An unknown name is still insertable as typed: a catalogue is never the whole
 // truth about a machine this verifier cannot see.
 {
