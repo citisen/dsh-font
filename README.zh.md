@@ -32,7 +32,7 @@ Geist Mono medium, "Zhuque Fangsong (technical preview)", monospace
 - **这段文字归你。** 插件不会改写它：不加引号、不重排、不整理，也不会把清空的框重新填满。新字体就落在光标处——因为你是在那里打的字；把某个字体放到最前面，要么自己敲 `Inter, `，要么在词条开头从补全列表里选。
 - **列表认识你机器上的字体。** 它补全字体族、通用族，以及某个字体族**实际拥有**的字重（从它的字面读取）。本机字体读取不可用或被拒绝时，会退回"探测到的常用字体"名单，并在行上方说明一次；任何名字始终可以手写，目录从不自称完整。
 - **输入框永远是同一个等宽字体。** 高亮层和真正的 textarea 共用一个盒子，而 textarea 没法给不同的字符串设不同字体，所以这个框统一使用一套系统等宽字体、字重固定 400、并关闭连字与字距调整——无论查询里写的是什么字体。带连字的字体（Fira Code 的 `->`）会在高亮层画成一个字形、在输入框里画成两个，合成字重也会两边不一致。框下那行读数用的是这条轴自己的字体，所以你选的字体在那里仍然看得见。
-- **Enter 只负责应用，从不替你补全。** 查询在 <kbd>Enter</kbd> 或离开输入框时解析并写入；<kbd>Tab</kbd>（或点击）才会接受高亮的那条补全——那是唯一会替换文本的情况，因为"选中一条建议"本身就是这个意思。
+- **设置跟着每一次按键走。** 文字归编辑器自己所有，所以没有"提交"这一步：查询边打边解析、边写入，框下的读数也随之更新。<kbd>Tab</kbd>（或点击）才会接受高亮的那条补全——那是唯一会替换文本的情况，因为"选中一条建议"本身就是这个意思。<kbd>Enter</kbd> 同样会接受高亮的补全，除此之外绝不改动文本。
 - **写错只标出来，不改。** 本机没有的字体族、字体族没有的字面、没闭合的引号、多出来的词，都会在框下分别以警告色或错误色标出，文本保持你写的样子。空输入框**什么都不写**并说明这一点：已保存的字体栈仍在生效，要回到出厂值按「恢复默认」。
 
 所有取值都通过宿主设置文档持久化（`$DSH_HOME/settings.yaml`，命名空间 `ui-font`），因此重启后依然生效，并且对指向同一台宿主的所有浏览器共享。
@@ -225,7 +225,7 @@ npm run watch     # 保存即重建，配合 dsh-client-hmr
 
 浏览器半边的唯一真源是 `src/client.js`。它为了可读性写成 ES module，但 DSH 的客户端 bundle 是**传统脚本（classic script）**，只允许通过 `window.__ModuleLoader__` 注册一个惰性 CommonJS 工厂——因此 `scripts/build-client.mjs` 负责套上这层外壳，并把静态 import 改写成 `require` 调用。这个转换刻意做得很窄，遇到无法改写的写法会直接让构建失败，因为没有打包器能替你发现问题。
 
-浏览器半边只允许请求 shell 注入模块表的那九个模块（`react`、`react/jsx-runtime`、`react-dom`、`react-dom/client`、`@deepseek-ai/cordis`、`@deepseek-ai/dsh-client-store`、`@deepseek-ai/dsh-client-ui-slots`、`@deepseek-ai/dsh-client-ui-primitives`、`@deepseek-ai/dsh-client-ui-dockkit`）；其它模块必须写进 `dsh.client.external` 并作为独立的图节点发布。构建会强制检查这一点。
+浏览器半边只允许向 shell 索取它注入模块表的那九个模块（`react`、`react/jsx-runtime`、`react-dom`、`react-dom/client`、`@deepseek-ai/cordis`、`@deepseek-ai/dsh-client-store`、`@deepseek-ai/dsh-client-ui-slots`、`@deepseek-ai/dsh-client-ui-primitives`、`@deepseek-ai/dsh-client-ui-dockkit`）。其它依赖一律编译进 bundle：库走 `VENDORED` 映射，本插件自己的 `src/font-grammar.js` 走 `LOCAL_MODULES`——它被直接拼进 `src/client.js` 的作用域，因此两者共用同一份常量。另一条有文档的路子是 `dsh.client.external`，但它需要第二个客户端 bundle、第二个 roster 行，以及宿主的配合；而且宿主会静默忽略 supplier 不是活跃插件行的条目。构建会强制检查每个 specifier 走的是哪条路。
 
 `verify-profile.mjs` 需要本机有 dsh 安装和已初始化的 profile，所以在两者都不存在时会**跳过**（exit 0）——干净的 CI runner 上没有 dsh。设 `DSH_REQUIRE=1` 可以把「跳过」变成失败。
 
@@ -252,6 +252,7 @@ dsh --profile web
 | `lib/index.js` | Node 半边：设置命名空间、首屏绘制前的注入。由 loader 加载。 |
 | `lib/client.js` | 浏览器半边，**由 `src/client.js` 生成**。由 `/plugins/@citisen/dsh-font/client.js` 提供。 |
 | `src/client.js` | 浏览器半边源码。 |
+| `src/font-grammar.js` | 字体查询语法，作为一份 `@citisen/litearea` grammar。会被拼进 `src/client.js`。 |
 | `cordis.patch.yml` | 本 bundle 贡献的 profile 层。 |
 | `scripts/` | 构建与校验脚本。 |
 | `.github/workflows/stage.yml` | 唯一发布路径的 CI 半边。 |

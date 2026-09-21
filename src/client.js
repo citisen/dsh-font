@@ -5,7 +5,8 @@
  * in the DSH client-bundle envelope and writes `lib/client.js`, which is what
  * the Web shell fetches. Keep it dependency-light: the only modules it may
  * `import` are the platform-singleton specifiers the shell seeds into its
- * module table, and the only Node-side API it may use is that table.
+ * module table, the editor engine the build compiles in, and this plugin's own
+ * `./font-grammar.js`, which the build splices into this same scope.
  *
  * Presentation strategy
  * ---------------------
@@ -25,12 +26,14 @@
  * @module dsh-font/client
  */
 
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { defineStore } from '@deepseek-ai/dsh-client-store'
 import {
   IconChevronDownOutline14,
   IconChevronUpOutline14,
 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { createEditor } from '@citisen/litearea'
+import { dshFontQueryGrammar } from './font-grammar.js'
 
 /** Settings namespace owned by this plugin (mirrors the host half). */
 const FONT_SETTINGS_NAMESPACE = 'ui-font'
@@ -287,17 +290,6 @@ function splitQueryEntries(text) {
     const lead = trimmed === '' ? text : text.slice(0, text.indexOf(trimmed))
     const core = trimmed
     const trail = text.slice(lead.length + core.length)
-    const quoteChar = core[0]
-    const quoted = quoteChar === '"' || quoteChar === "'"
-    const close = quoted ? core.indexOf(quoteChar, 1) : -1
-    const closed = close > 0
-    // The family text: the quotes are punctuation, not part of the name, and
-    // anything after the closing quote (a weight word) still belongs to the
-    // entry, so it is kept — with the quote pair taken out of the middle.
-    const tail = closed ? core.slice(close + 1).trim() : ''
-    const inner = quoted
-      ? [closed ? core.slice(1, close) : core.slice(1), tail].filter((part) => part !== '').join(' ')
-      : core
     return {
       text,
       start: from,
@@ -305,16 +297,12 @@ function splitQueryEntries(text) {
       lead,
       core,
       trail,
-      quoted,
-      closed,
-      inner,
     }
   })
 }
 
 /**
- * Read one entry into the family it names, the weight word it carries, and the
- * highlight kind of its family part.
+ * Read one entry into the family it names and the weight word it carries.
  *
  * The two shapes a weight can take are both here: a bare entry whose last word
  * is a weight (`Geist Mono medium`), and a quoted family followed by one
@@ -323,22 +311,24 @@ function splitQueryEntries(text) {
  * quote is the last character carries no weight, so `"Book Antiqua"` stays a
  * name even though a bare `Book Antiqua` could split if it were not catalogued.
  *
+ * This is the same reading the editor's grammar performs, and the grammar is
+ * built on this function rather than on a second copy of it.
+ *
  * @param entry - one record from {@link splitQueryEntries}.
  * @param known - the lowercase catalogue.
  * @param enumerated - whether the catalogue is authoritative.
- * @returns `{ name, word, wordLength, kind, diagnostics }`.
+ * @returns `{ name, word, diagnostics }`.
  */
 function readQueryEntry(entry, known, enumerated) {
   const core = entry.core
   const diagnostics = []
-  if (core === '') return { name: '', word: undefined, wordLength: 0, kind: 'empty', diagnostics }
+  if (core === '') return { name: '', word: undefined, diagnostics }
 
   const quoteChar = core[0]
   const quote = quoteChar === '"' || quoteChar === "'" ? quoteChar : ''
   const lower = core.toLowerCase()
   let name = core
   let word
-  let wordLength = 0
 
   if (quote !== '') {
     const close = core.indexOf(quote, 1)
@@ -351,7 +341,6 @@ function readQueryEntry(entry, known, enumerated) {
       if (rest !== '') {
         if (Object.hasOwn(WEIGHT_WORDS, rest.toLowerCase())) {
           word = rest.toLowerCase()
-          wordLength = rest.length
         } else {
           diagnostics.push({ code: QUERY_DIAGNOSTIC.trailingText, text: rest })
         }
@@ -363,13 +352,11 @@ function readQueryEntry(entry, known, enumerated) {
     // A bare weight word stands on its own, without a family.
     name = ''
     word = lower
-    wordLength = core.length
   } else {
     const cut = lower.lastIndexOf(' ')
     if (cut > 0 && Object.hasOwn(WEIGHT_WORDS, lower.slice(cut + 1))) {
       word = lower.slice(cut + 1)
-      wordLength = word.length
-      name = core.slice(0, core.length - wordLength).trim()
+      name = core.slice(0, core.length - word.length).trim()
     }
   }
 
@@ -379,20 +366,7 @@ function readQueryEntry(entry, known, enumerated) {
   if (nameLower !== '' && !generic && !catalogued && enumerated) {
     diagnostics.push({ code: QUERY_DIAGNOSTIC.unknownFamily, name: name.trim() })
   }
-  return {
-    name: name.trim(),
-    word,
-    wordLength,
-    kind:
-      nameLower === ''
-        ? 'weight'
-        : generic
-          ? 'generic'
-          : catalogued || !enumerated
-            ? 'family'
-            : 'unknown',
-    diagnostics,
-  }
+  return { name: name.trim(), word, diagnostics }
 }
 
 /** The diagnostic-free pieces a query resolves to. */
@@ -403,18 +377,17 @@ function emptyQueryRead() {
     weightWord: undefined,
     effective: -1,
     diagnostics: [],
-    tokens: [],
   }
 }
 
 /**
- * Read a query into families, a weight, and highlight tokens — the one pass
- * behind both {@link parseFontQuery} and {@link fontQueryTokens}.
+ * Read a query into the families it names, the weight it carries, and the
+ * problems a reader is owed — the one pass behind {@link parseFontQuery}.
  * @param text - the query.
  * @param options - `{ catalogue, styles, enumerated }`. `enumerated` declares
  *   the catalogue authoritative (read from the machine), which is what makes an
  *   unrecognized family worth warning about.
- * @returns `{ entries, families, weight, weightWord, effective, diagnostics, tokens }`.
+ * @returns `{ entries, families, weight, weightWord, effective, diagnostics }`.
  */
 function readFontQuery(text, options) {
   const read = emptyQueryRead()
@@ -427,10 +400,9 @@ function readFontQuery(text, options) {
   for (const key of Object.keys(styles)) styleKeys.set(key.toLowerCase(), key)
   const enumerated = options?.enumerated === true
 
-  const entries = splitQueryEntries(text)
   let sawWeight = false
 
-  for (const entry of entries) {
+  for (const entry of splitQueryEntries(text)) {
     const readEntry = readQueryEntry(entry, known, enumerated)
     for (const diagnostic of readEntry.diagnostics) read.diagnostics.push(diagnostic)
     if (readEntry.name !== '') read.families.push(readEntry.name)
@@ -444,29 +416,6 @@ function readFontQuery(text, options) {
         read.diagnostics.push({ code: QUERY_DIAGNOSTIC.duplicateWeight, word: readEntry.word })
       }
     }
-
-    // ── the highlight tokens for this entry ─────────────────────────────────
-    // They concatenate back into the input exactly, which is what lets the
-    // painted layer and the (invisible) textarea stay aligned glyph for glyph.
-    if (entry.lead !== '') read.tokens.push({ text: entry.lead, kind: 'space' })
-    if (entry.core !== '') {
-      if (readEntry.wordLength > 0 && readEntry.name !== '') {
-        read.tokens.push({
-          text: entry.core.slice(0, entry.core.length - readEntry.wordLength),
-          kind: readEntry.kind,
-          family: readEntry.name,
-        })
-        read.tokens.push({
-          text: entry.core.slice(-readEntry.wordLength),
-          kind: 'weight',
-          family: readEntry.name,
-        })
-      } else {
-        read.tokens.push({ text: entry.core, kind: readEntry.kind, family: readEntry.name })
-      }
-    }
-    if (entry.trail !== '') read.tokens.push({ text: entry.trail, kind: 'space' })
-    if (entry.end < text.length) read.tokens.push({ text: ',', kind: 'comma' })
   }
 
   // ── the family that is actually in effect ────────────────────────────────
@@ -501,9 +450,6 @@ function readFontQuery(text, options) {
         weight: read.weight,
         word: read.weightWord,
       })
-      for (const token of read.tokens) {
-        if (token.kind === 'weight') token.kind = 'weightMissing'
-      }
     }
   }
 
@@ -528,16 +474,6 @@ function parseFontQuery(text, options) {
 }
 
 /**
- * Tokenize a query for the painted layer that sits behind the textarea.
- * @param text - the query.
- * @param options - see {@link readFontQuery}.
- * @returns the tokens, whose `text` concatenates back into the input exactly.
- */
-function fontQueryTokens(text, options) {
-  return readFontQuery(text, options).tokens
-}
-
-/**
  * Write families and a weight back out as the canonical query.
  *
  * The weight is attached to the first family — the one in effect — and is
@@ -559,234 +495,65 @@ function serializeFontQuery(families, weight) {
 }
 
 /**
- * Locate the entry a caret sits in, and the word inside it being typed.
+ * Families plus a weight, as the text the editor edits.
  *
- * The replacement range is the WHOLE entry, not the word: a family name is
- * several words (`Geist Mono`), so completing `geist mo` has to replace both.
- * The word is still reported, because it is what tells a weight completion
- * (`Geist Mono b` -> `bold`) from a family completion.
- *
- * @param text - the query.
- * @param caret - the caret offset.
- * @returns `{ start, end, core, inner, quoted, head, word, weightWord, familyEnd,
- *   caretInCore }`: `inner` is the entry with its quotes taken out, `head` the
- *   entry text before the word being typed (trimmed, unquoted), `weightWord` the
- *   complete weight word the entry already ends with, and `familyEnd` where the
- *   family part of the entry stops, in core offsets.
+ * The axis's shipped weight carries no word. Nobody chose it, so spelling it out
+ * would put a `regular` after every interface font, and for the interface axis
+ * 400 literally means "no override"; the readout under the field is where the
+ * value in force is stated instead.
+ * @param families - family names in priority order.
+ * @param weight - the axis's weight.
+ * @param shippedWeight - the weight the axis ships with.
+ * @returns the query text.
  */
-function queryContextAt(text, caret) {
-  const source = typeof text === 'string' ? text : ''
-  const position = Math.min(Math.max(Number.isFinite(caret) ? caret : 0, 0), source.length)
-  const entries = splitQueryEntries(source)
-  let entry = entries[entries.length - 1]
-  for (const candidate of entries) {
-    if (position <= candidate.end) {
-      entry = candidate
-      break
-    }
-  }
-  const caretInCore = Math.max(position - entry.start - entry.lead.length, 0)
-  const before = entry.core.slice(0, caretInCore)
-  const after = entry.core.slice(before.length)
-  const left = /\S*$/.exec(before)?.[0] ?? ''
-  const right = /^\S*/.exec(after)?.[0] ?? ''
-
-  // A trailing complete weight word is not part of the family name, so the
-  // family text ends before it: that is what keeps `"Geist Mono" medium`
-  // suggesting families and weights instead of being read as one long name.
-  const lower = entry.core.toLowerCase()
-  const cut = lower.lastIndexOf(' ')
-  const tail = cut > 0 ? lower.slice(cut + 1) : ''
-  const weightWord = Object.hasOwn(WEIGHT_WORDS, tail) ? tail : undefined
-
-  return {
-    start: entry.start,
-    end: entry.end,
-    core: entry.core,
-    inner: entry.inner,
-    quoted: entry.quoted,
-    head: unquoteName(before.slice(0, before.length - left.length).trim()),
-    word: `${left}${right}`,
-    weightWord,
-    familyEnd: weightWord === undefined ? entry.core.length : Math.max(cut, 0),
-    caretInCore,
-  }
-}
-
-/** Strip one matching pair of surrounding quotes from a name. */
-function unquoteName(name) {
-  const text = String(name)
-  const quoteChar = text[0]
-  if ((quoteChar === '"' || quoteChar === "'") && text.length >= 2 && text.endsWith(quoteChar)) {
-    return text.slice(1, -1)
-  }
-  return text
-}
-
-/** Exact, case-insensitive lookup of one name in a suggestion space. */
-function findExactName(names, needle) {
-  const lower = needle.toLowerCase()
-  return names.find((name) => name.toLowerCase() === lower)
-}
-
-/** One entry of the autocomplete list, in the order the popup shows them. */
-const SUGGESTION_LIMIT = 40
-
-/**
- * The whole autocomplete decision, as a pure function of the text and caret.
- *
- * Candidates are family names, generic keywords, and — when the entry already
- * names a family — that family's weight words, written as `<family> <weight>`
- * so picking one both sets the family and the weight in a single edit. The
- * weights come from the machine's faces when they could be read, and from the
- * closed CSS vocabulary otherwise, so the weight is always discoverable even
- * without the Local Font Access permission.
- *
- * @param context - the result of {@link queryContextAt}.
- * @param options - `{ catalogue, styles, enumerated, shippedWeight }`.
- *   `shippedWeight` is the axis's implicit weight, offered as a row that takes
- *   the word away instead of writing it.
- * @returns `{ start, end, at, items, custom }`; `items` are ordered for display.
- */
-function querySuggestions(context, options) {
-  const catalogue = Array.isArray(options?.catalogue) ? options.catalogue : []
-  const styles = options?.styles ?? {}
-  const space = [...new Set([...catalogue, ...GENERIC_FAMILIES])]
-  // The needle is the FAMILY part of the entry: a weight word the entry already
-  // carries would otherwise make `"Geist Mono" medium` match no family at all.
-  const inner = context.inner.trim()
-  const needle = context.weightWord === undefined ? inner : inner.slice(0, -(context.weightWord.length)).trim()
-  const exact = needle === '' ? undefined : findExactName(space, needle)
-  const head = context.head === '' ? undefined : findExactName(space, context.head)
-  const family = exact ?? head
-  const wordPrefix = (exact === undefined ? context.word : '').toLowerCase()
-
-  const matches = rankFamilyMatches(space, needle).slice(0, SUGGESTION_LIMIT)
-
-  const items = []
-  const families = matches.map((name) => ({
-    id: `family:${name}`,
-    kind: isGenericFamilyName(name.toLowerCase()) ? 'generic' : 'family',
-    // A completion never drops a weight the entry already states: the word
-    // travels with the pick, so swapping the family does not quietly reset the
-    // weight and picking the family already there changes nothing at all.
-    insert:
-      context.weightWord === undefined
-        ? quoteFamily(name)
-        : `${quoteFamily(name)} ${context.weightWord}`,
-    name,
-  }))
-
-  // A weight is only offered once the entry names a family, so the list never
-  // fills with weights while the user is still spelling the family out.
-  const weights = []
-  if (family !== undefined) {
-    const key = Object.keys(styles).find((name) => name.toLowerCase() === family.toLowerCase())
-    const detected = key === undefined ? [] : faceWeights(styles[key])
-    const pool = detected.length > 0 ? detected : FONT_WEIGHTS
-    for (const weight of pool) {
-      const word = weightWord(weight)
-      if (wordPrefix !== '' && !word.startsWith(wordPrefix)) continue
-      weights.push({
-        id: `weight:${family}:${String(weight)}`,
-        kind: 'weight',
-        // The axis's shipped weight is implicit, so picking it takes the word
-        // away rather than spelling out a value nobody chose.
-        insert: weight === options?.shippedWeight ? quoteFamily(family) : `${quoteFamily(family)} ${word}`,
-        family,
-        word,
-        weight,
-      })
-    }
-    // The weight the entry already states leads its own list, so an Enter that
-    // accepts the highlighted row re-applies what is written instead of
-    // silently moving a complete query to another weight.
-    const current = weights.findIndex((item) => item.word === context.weightWord)
-    if (current > 0) weights.unshift(...weights.splice(current, 1))
-  }
-
-  // The word being typed decides what leads: once the caret is past the family
-  // name, the weight is what the user is reaching for (`Geist Mono b` -> Bold),
-  // while a caret inside the name keeps the family list first (`inter t` ->
-  // Inter Tight, not Inter's Thin).
-  const atFamilyEnd = context.caretInCore >= context.familyEnd
-  const weightFirst =
-    family !== undefined && atFamilyEnd && (exact !== undefined || families.length === 0)
-
-  // Where the pick lands. A caret at the very start of a COMPLETE entry is a
-  // boundary, not an edit: the user put it before the family to place another
-  // one ahead of it — a fallback stays a fallback — which is how a family is
-  // promoted to the front without dragging anything. Anywhere else the entry
-  // under the caret is what is being written, so the pick replaces it. A weight
-  // never inserts a new entry: it completes the one it is next to, which
-  // {@link applySuggestion} enforces from the chosen row's kind.
-  const atBoundary = context.caretInCore === 0 && exact !== undefined
-
-  return {
-    start: context.start,
-    end: context.end,
-    at: atBoundary ? 'before' : 'entry',
-    items: [...(weightFirst ? weights : families), ...(weightFirst ? families : weights)].slice(
-      0,
-      SUGGESTION_LIMIT,
-    ),
-    // The custom row inserts the entry AS TYPED — weight word included — while
-    // the ranking above used the family part alone.
-    custom:
-      needle !== '' && exact === undefined && !isGenericFamilyName(needle.toLowerCase())
-        ? inner
-        : undefined,
-  }
-}
-
-/** Clamp the highlighted index against a list that may have shrunk under it. */
-function clampHighlight(items, active) {
-  return items.length === 0 ? -1 : Math.min(Math.max(active, 0), items.length - 1)
+function asQuery(families, weight, shippedWeight) {
+  return serializeFontQuery(families, weight === shippedWeight ? undefined : weight)
 }
 
 /**
- * Place a chosen completion into the query.
+ * The two stored fields read as the one query the editor edits.
  *
- * Two shapes, because the caret means two things. `at: 'entry'` replaces the
- * entry under the caret — what completing a half-typed family needs, since a
- * family name is several words. `at: 'before'` inserts a whole new entry ahead
- * of the one under the caret, which is how a family is put in charge without
- * touching the fallbacks behind it.
- *
- * A trailing `, ` is added after a family so the next fallback can be typed
- * straight away — but not after a weight, which completes the entry instead of
- * inviting another one. An empty entry at the end of the query is what the
- * canonical form drops on commit, so the affordance never reaches the setting.
- *
- * @param text - the query.
- * @param suggestion - `{ start, end, at }` from {@link querySuggestions}.
- * @param insert - the text to place there.
- * @param kind - the chosen item's kind, which decides the trailing comma.
- * @returns `{ text, caret }`.
+ * The family list is parsed rather than trusted: a weight word left inside the
+ * stored string by a hand edit belongs to the weight field, so the two values
+ * are read as one query instead of the raw string being shown. A value that
+ * parses to no family at all is kept as written, which is what stops a stack
+ * the parser cannot place from being silently emptied on load.
+ * @param value - the stored family list.
+ * @param weight - the stored weight.
+ * @param options - see {@link readFontQuery}.
+ * @param shippedWeight - the weight the axis ships with.
+ * @returns `{ text, families }`: the text the editor starts from, and the family
+ *   names it stands for, which is what the readout under the box states.
  */
-function applySuggestion(text, suggestion, insert, kind) {
-  const source = typeof text === 'string' ? text : ''
-  const start = Math.min(Math.max(suggestion.start, 0), source.length)
-  const end = Math.min(Math.max(suggestion.end, start), source.length)
-  const before = source.slice(0, start)
-  // Inserting ahead of the entry keeps the whole entry; replacing it keeps only
-  // what follows it. A weight is never an insertion, whatever the caret says.
-  const insertingBefore = suggestion.at === 'before' && kind !== 'weight'
-  const after = source.slice(insertingBefore ? start : end)
+function storedQuery(value, weight, options, shippedWeight) {
+  const read = parseFontQuery(value, options)
+  const families = read.families.length > 0 ? read.families : parseFamilyList(value)
+  return { text: asQuery(families, weight, shippedWeight), families }
+}
 
-  if (insertingBefore) {
-    // The space the entry carried belonged to the comma before it, so it is
-    // restored rather than doubled — and the entry itself is kept verbatim.
-    const rest = after.replace(/^\s+/, '')
-    const head = before !== '' && !/\s$/.test(before) ? `${before} ` : before
-    return { text: `${head}${insert}, ${rest}`, caret: head.length + insert.length + 2 }
-  }
-
-  const trailing = after === '' && kind !== 'weight' ? ', ' : ''
-  return {
-    text: `${before}${insert}${trailing}${after}`,
-    caret: before.length + insert.length + trailing.length,
-  }
+/**
+ * Tell the row what a query means: the two settings fields it names.
+ *
+ * This is the whole hand-off between the editor and the settings, and it is a
+ * pure function of the text, so the verifier can drive it without a browser. It
+ * runs on EVERY change rather than on a commit: the library owns the text, so
+ * there is no controlled field to re-render and nothing to wait for.
+ *
+ * A query that names no family is an unfinished edit and writes nothing — the
+ * saved stack is still in use, and silently refilling a box the user just
+ * cleared is indistinguishable from a bug. A query that names a weight but no
+ * family still moves that axis, because a weight alone is a complete statement
+ * about it.
+ * @param text - the query as it stands in the editor.
+ * @param options - see {@link readFontQuery}.
+ * @param write - `{ onFamilies, onWeight }`, the row's two write paths.
+ * @returns the parse, so a caller can report the same reading it wrote.
+ */
+function applyFontQuery(text, options, write) {
+  const read = parseFontQuery(text, options)
+  if (read.families.length > 0) write.onFamilies(serializeFamilyList(read.families))
+  if (read.weight !== undefined) write.onWeight(read.weight)
+  return read
 }
 
 /**
@@ -837,6 +604,42 @@ function moveFontQueryEntry(text, caret, delta) {
     text: parts.join(','),
     caret: starts[target] + entries[target].lead.length + offset,
   }
+}
+
+/**
+ * Alt+Arrow: move the entry the caret sits in, and put the caret back on it.
+ *
+ * This is the plugin's own binding, not an editor feature. The library has no
+ * such key — reordering is a fact about a font stack, where the first resolvable
+ * family wins, and not about text in general — so it is implemented here, on the
+ * editor's own `input`, and it is the only keyboard gesture this plugin adds.
+ *
+ * It is a TEXT edit rather than a settings write. `setValue(…, true)` is what
+ * makes it one undoable edit rather than a document load, which is what keeps
+ * Ctrl+Z from throwing away everything the user typed before the move; the caret
+ * is restored afterwards because the reorder moved the text under it.
+ *
+ * @param editor - the editor handle: `value`, `input`, `setValue`, `setSelection`.
+ * @param event - the `keydown` event.
+ * @param options - see {@link readFontQuery}.
+ * @param write - `{ onFamilies, onWeight }`, the row's two write paths.
+ * @returns `{ text, caret }` when the key moved an entry, `undefined` when it was
+ *   not a reorder or the entry was already at the end of the list.
+ */
+function reorderFontQueryEntry(editor, event, options, write) {
+  if (event.altKey !== true) return undefined
+  if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return undefined
+  const moved = moveFontQueryEntry(
+    editor.value,
+    editor.input.selectionStart ?? 0,
+    event.key === 'ArrowUp' ? -1 : 1,
+  )
+  if (moved.text === editor.value) return undefined
+  event.preventDefault()
+  editor.setValue(moved.text, true)
+  editor.setSelection(moved.caret)
+  applyFontQuery(moved.text, options, write)
+  return moved
 }
 
 /**
@@ -1272,29 +1075,6 @@ async function discoverFamilies() {
   return { ...result, measured: true }
 }
 
-/**
- * Rank the catalogue against what the user has typed: exact match, then prefix,
- * then substring, then everything else. An empty query returns the catalogue
- * as-is so the dropdown doubles as a browse list.
- * @param families - the catalogue.
- * @param query - the current input text.
- * @returns the ordered candidates.
- */
-function rankFamilyMatches(families, query) {
-  const needle = query.trim().toLowerCase()
-  if (needle === '') return families
-  const exact = []
-  const prefix = []
-  const contains = []
-  for (const family of families) {
-    const lower = family.toLowerCase()
-    if (lower === needle) exact.push(family)
-    else if (lower.startsWith(needle)) prefix.push(family)
-    else if (lower.includes(needle)) contains.push(family)
-  }
-  return [...exact, ...prefix, ...contains]
-}
-
 /** Row copy, keyed by locale. `zh` is the key-set source of truth. */
 const zh = {
   'font.title': '字体',
@@ -1308,10 +1088,6 @@ const zh = {
   'font.uiWeight': '界面字重',
   'font.codeWeight': '代码字重',
   'font.weightShipped': '（出厂值，未覆盖）',
-  'font.suggestions': '字体建议',
-  'font.familyKind': '字体族',
-  'font.genericKind': '通用族',
-  'font.pending': '按 Enter 应用（文本不会被改写）',
   'font.emptyQuery': '这个查询还是空的：没有写入任何字体，当前仍在用已保存的设置；要回到出厂值请按「恢复默认」',
   'font.diag.unknownFamily': '本机字体列表里没有 {name}，仍会写入，浏览器可能回退到后面的字体',
   'font.diag.missingWeight': '{family} 在本机没有 {weight} 这个字面（{word}），浏览器会合成',
@@ -1337,7 +1113,6 @@ const zh = {
   'font.reset': '恢复默认',
   'font.increase': '增大',
   'font.decrease': '减小',
-  'font.add': '插入',
   'font.catalogProbed':
     '字体列表只包含探测到的常用字体（读取本机字体的权限不可用或被拒绝）；任何字体名仍然可以直接写',
   'font.genericWarning': '末尾缺少通用字体族（如 sans-serif），指定字体都缺失时可能回退到意外字体',
@@ -1357,10 +1132,6 @@ const en = {
   'font.uiWeight': 'Interface weight',
   'font.codeWeight': 'Code weight',
   'font.weightShipped': ' (shipped, not overridden)',
-  'font.suggestions': 'Font suggestions',
-  'font.familyKind': 'family',
-  'font.genericKind': 'generic',
-  'font.pending': 'Press Enter to apply (your text is not rewritten)',
   'font.emptyQuery':
     'This query is empty: nothing is written, the saved setting is still in use — press Reset to defaults to go back to the shipped stack',
   'font.diag.unknownFamily':
@@ -1391,7 +1162,6 @@ const en = {
   'font.reset': 'Reset to defaults',
   'font.increase': 'Increase',
   'font.decrease': 'Decrease',
-  'font.add': 'Insert',
   'font.catalogProbed':
     'The font list holds only common fonts found by probing (reading this machine\u2019s fonts is unavailable or was declined); any family can still be typed',
   'font.genericWarning':
@@ -1697,51 +1467,21 @@ const ROW_CSS = [
   '.dsh-font-reset:hover{background:var(--dsw-alias-interactive-bg-hover)}',
   // ── the query editor ──────────────────────────────────────────────────────
   //
-  // The editor is a textarea with a painted layer behind it. The textarea owns
-  // the text and the caret but renders it transparent; the layer renders the
-  // same characters, split into coloured tokens.
+  // The editor is `@citisen/litearea`'s, and it carries its own stylesheet: the
+  // layer it paints behind the textarea, the completion list, the tooltip, and
+  // the one typography rule that keeps the paint on the characters. Its
+  // appearance comes from custom properties, which `EDITOR_VARIABLES` binds to
+  // the interface's own tokens per instance, so nothing here restates any of it.
   //
-  // ONE FONT, AND IT IS NOT THE USER'S. A textarea cannot style a substring, so
-  // the layer and the field can only stay aligned if every character comes from
-  // the same face at the same weight — the whole box therefore uses one system
-  // monospace at 400, whatever font the query names. The user's font would break
-  // this twice over: a programming face with ligatures (`->` in Fira Code) draws
-  // one glyph in the layer while the field draws two, and a weight the face does
-  // not have is synthesized differently in each. Ligatures, kerning, and
-  // stretching are switched off outright for the same reason.
-  //
-  // The layer is therefore only ever allowed colour, background, and
-  // text-decoration: anything that changes a glyph's advance would desynchronize
-  // the two.
+  // The border is the one exception: every field in this interface is a hairline,
+  // which is a fact about the design system rather than about the editor.
   '.dsh-font-query{flex-direction:column;gap:4px;display:flex}',
-  '.dsh-font-queryBox{position:relative;border:.5px solid var(--dsw-alias-border-l4);border-radius:8px;background:var(--dsw-alias-bg-module-platform)}',
-  '.dsh-font-queryBox:focus-within{border-color:var(--dsw-alias-brand-primary)}',
-  '.dsh-font-queryLayer,.dsh-font-queryInput{box-sizing:border-box;width:100%;margin:0;padding:5px 10px;border:none;font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;font-size:13px;font-weight:400;font-style:normal;font-stretch:normal;font-variant-ligatures:none;font-kerning:none;font-feature-settings:"liga" 0,"calt" 0,"dlig" 0;line-height:20px;letter-spacing:normal;word-spacing:normal;text-transform:none;text-indent:0;tab-size:4;white-space:pre-wrap;overflow-wrap:break-word;word-break:break-word}',
-  '.dsh-font-queryLayer{position:absolute;inset:0;overflow:hidden;pointer-events:none;color:var(--dsw-alias-label-primary)}',
-  '.dsh-font-queryInput{position:relative;display:block;min-height:32px;max-height:120px;resize:none;overflow-y:auto;background:transparent;color:transparent;caret-color:var(--dsw-alias-label-primary);outline:none}',
-  '.dsh-font-queryInput::placeholder{color:var(--dsw-alias-label-tertiary)}',
-  '.dsh-font-queryInput::selection{background:var(--dsw-alias-interactive-bg-active)}',
-  '.dsh-font-qFamily{color:var(--dsw-alias-label-primary)}',
-  // The family that is in effect: the first one the browser can actually use.
-  '.dsh-font-qEffective{background:var(--dsw-alias-markdown-inline-code);border-radius:3px}',
-  // Keywords, not state: a generic family and a weight word are syntax. The
-  // accent is the link colour because `--dsw-alias-brand-primary` resolves to
-  // the ordinary text colour in both themes, which would colour nothing.
-  '.dsh-font-qGeneric,.dsh-font-qWeight{color:var(--dsw-alias-link)}',
-  '.dsh-font-qUnknown{color:var(--dsw-alias-state-warn-primary)}',
-  '.dsh-font-qWeightMissing{color:var(--dsw-alias-state-warn-primary);text-decoration:underline wavy var(--dsw-alias-state-warn-primary)}',
-  '.dsh-font-qComma{color:var(--dsw-alias-label-caption)}',
-  '.dsh-font-menu{position:absolute;z-index:20;left:0;right:0;top:calc(100% + 4px);max-height:240px;overflow-y:auto;margin:0;padding:4px;list-style:none;background:var(--dsw-alias-bg-layer-2);border:.5px solid var(--dsw-alias-border-l2);border-radius:10px;box-shadow:var(--dsw-elevation-panel)}',
-  '.dsh-font-option{cursor:pointer;border-radius:6px;padding:5px 8px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:8px}',
-  '.dsh-font-optionActive{background:var(--dsw-alias-interactive-bg-hover)}',
-  '.dsh-font-optionKey{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}',
-  '.dsh-font-optionDetail{flex:none;color:var(--dsw-alias-label-tertiary);font-size:11px}',
-  '.dsh-font-optionCustom{color:var(--dsw-alias-label-secondary);border-top:.5px solid var(--dsw-alias-border-l2);border-radius:0 0 6px 6px;display:block}',
+  '.dsh-font-editor{display:block}',
+  '.dsh-font-editor .litearea-box{border-width:.5px}',
   '.dsh-font-meta{flex-wrap:wrap;gap:8px;justify-content:space-between;display:flex}',
   '.dsh-font-warn{color:var(--dsw-alias-state-warn-primary);font-size:11px;line-height:16px}',
   // Text the reader could not parse: a red line, not a suggestion.
   '.dsh-font-warn.dsh-font-error{color:var(--dsw-alias-state-error-primary)}',
-  '.dsh-font-pending{color:var(--dsw-alias-link);font-size:11px;line-height:16px}',
 ].join('')
 
 /** Install the row chrome stylesheet for the plugin's lifetime. */
@@ -1783,54 +1523,66 @@ function Field({ label, value, hint, children }) {
   )
 }
 
-/** The class one highlight token is painted with. */
-const QUERY_TOKEN_CLASS = {
-  family: 'dsh-font-qFamily',
-  generic: 'dsh-font-qGeneric',
-  unknown: 'dsh-font-qUnknown',
-  weight: 'dsh-font-qWeight',
-  weightMissing: 'dsh-font-qWeightMissing',
-  comma: 'dsh-font-qComma',
-  space: '',
-}
-
 /**
- * The class for one token, plus the pill that marks the family in effect.
+ * The design tokens the editor is themed with, as litearea custom properties.
  *
- * Only colour, background, and text-decoration may ever appear here: the layer
- * this paints shares a box with the real textarea, so any property that changes
- * a glyph's advance would slide every colour off its character.
- * @param token - one token from {@link fontQueryTokens}.
- * @param effectiveFamily - the lowercase name of the family in effect.
- * @returns the class attribute value.
+ * CSS stays the theme language: the editor's whole appearance is already
+ * described by custom properties, so binding them to the interface's own tokens
+ * is what makes the box look native instead of like a control that wandered in
+ * from somewhere else. Setting them here rather than in the stylesheet also
+ * means they follow the INTERFACE's theme switch, not the operating system's —
+ * the library's own dark palette is driven by `prefers-color-scheme`, and those
+ * two are not the same thing.
+ *
+ * The type is the one thing deliberately not inherited from the interface. The
+ * box edits a query rather than prose: one system monospace at a fixed size
+ * keeps the entries aligned as the list they are, and keeps the text from
+ * reflowing the moment the query changes the interface font. The weight is
+ * fixed too — a face whose 400 is synthesized differently from its 700 would
+ * move the glyphs under the paint.
+ *
+ * Deliberately not mapped: the per-scope colours. Every hue the grammar paints
+ * with is derived from one of these except the generic-family one, and that one
+ * is legible on either surface.
  */
-function queryTokenClass(token, effectiveFamily) {
-  const base = QUERY_TOKEN_CLASS[token.kind] ?? ''
-  if (token.family === undefined || effectiveFamily === undefined) return base
-  return token.family.toLowerCase() === effectiveFamily
-    ? `${base} dsh-font-qEffective`.trim()
-    : base
+const EDITOR_VARIABLES = {
+  font: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
+  'font-size': '13px',
+  'line-height': '20px',
+  'padding-block': '5px',
+  'padding-inline': '10px',
+  radius: '8px',
+  fg: 'var(--dsw-alias-label-primary)',
+  'fg-dim': 'var(--dsw-alias-label-tertiary)',
+  'fg-strong': 'var(--dsw-alias-label-primary)',
+  bg: 'var(--dsw-alias-bg-module-platform)',
+  'bg-raised': 'var(--dsw-alias-bg-layer-2)',
+  border: 'var(--dsw-alias-border-l4)',
+  'border-focus': 'var(--dsw-alias-state-business-primary)',
+  accent: 'var(--dsw-alias-state-business-primary)',
+  error: 'var(--dsw-alias-state-error-primary)',
+  warning: 'var(--dsw-alias-state-warn-primary)',
+  shadow: 'var(--dsw-elevation-panel)',
 }
 
 /**
- * The font-query editor: a textarea over a painted layer, with autocomplete.
+ * The font-query editor: the library's editor over this plugin's grammar.
  *
- * Why a textarea and not `contenteditable`: the query is a *string* the user is
- * editing, so the browser's own text editing — selection, undo, IME, soft wrap
- * — is exactly what is wanted, and a painted layer behind a transparent
- * textarea reproduces it with syntax colours. `contenteditable` would mean
- * re-implementing all of that on top of a DOM that fights back.
+ * The hand-written half is gone — the painted token layer, the completion
+ * popup, the highlight index, the caret bookkeeping, and the alignment contract
+ * between two stacked elements — and with it every reason this field was hard
+ * to get right. What stays is the plugin's own: the query's parse, its
+ * localized diagnostics, the two settings it writes, and the keyboard reorder.
  *
- * THE RULE THIS COMPONENT FOLLOWS: the text belongs to the user.
+ * THE RULE THIS COMPONENT STILL FOLLOWS: the text belongs to the user.
  *
- * It is never rewritten — not quoted, not reordered, not tidied, not refilled
- * when it is empty. Applying a query (Enter, or leaving the field) parses it and
- * writes the settings it names; it does not touch a character. Anything wrong
- * with the query is marked under the field and left alone. The only exception is
- * a completion the user picks from the list, which is an explicit request for
- * that replacement, and the only way a value from outside takes the text over is
- * a change that means something different from what is on screen (Reset, another
- * tab) while the field is not focused.
+ * Nothing here rewrites it — not quoting, not reordering, not tidying, not
+ * refilling an empty box. The editor owns the text, so the settings follow
+ * EVERY keystroke: the old field had to wait for Enter because writing on each
+ * change re-rendered a controlled textarea, and that round trip is exactly what
+ * destroyed the browser's undo stack and reset the caret. A value that arrives
+ * from outside takes the field over only when it MEANS something different from
+ * what is on screen, and never while the user is in the field.
  *
  * @param props - React props.
  * @returns the editor element.
@@ -1847,6 +1599,8 @@ function FontQueryEditor({
   onFamilies,
   onWeight,
 }) {
+  const hostRef = useRef(null)
+  const editorRef = useRef(undefined)
   /**
    * The axis's shipped weight. A query at this weight carries no word: the
    * shipped value is not something the user chose, and spelling it out put a
@@ -1855,337 +1609,152 @@ function FontQueryEditor({
    */
   const shippedWeight = monospace === true ? DEFAULT_CODE_FONT_WEIGHT : DEFAULT_UI_FONT_WEIGHT
   const options = { catalogue, styles, enumerated }
-  /** Families plus a weight, as the text the field edits. */
-  const asQuery = (families, weight) =>
-    serializeFontQuery(families, weight === shippedWeight ? undefined : weight)
-  // The stored value rendered as the field's text. A weight word left inside the
-  // family string by a hand edit belongs to the weight field, so the two stored
-  // values are shown as one query rather than the raw string.
-  const stored = parseFontQuery(value, options)
-  const storedFamilies = stored.families.length > 0 ? stored.families : parseFamilyList(value)
-  const storedText = asQuery(storedFamilies, weight)
+  /** The stored settings as the text the editor starts from, and the stack. */
+  const stored = storedQuery(value, weight, options, shippedWeight)
+  /** The text the editor holds, mirrored into state for the readouts below. */
+  const [text, setText] = useState(stored.text)
 
   /**
-   * THE EDITING RULE: the text is the user's.
+   * The grammar as the library resolves it: a live view of the newest options.
    *
-   * Nothing here ever rewrites what was typed. `draft` holds it verbatim, and it
-   * is replaced only by a value that arrives from outside (Reset, another tab) —
-   * or by a completion the user explicitly picked. Applying a query parses it and
-   * writes the two settings fields; it does not touch the text. A query that
-   * resolves to nothing is an unfinished edit and writes nothing at all, rather
-   * than being "helpfully" replaced by the shipped stack: silently refilling a
-   * box the user just cleared is indistinguishable from a bug.
-   *
-   * `undefined` means "nothing typed yet — show the stored value".
+   * The catalogue is the machine's and it answers late — discovery finishes long
+   * after this row has mounted — so the vocabulary cannot be fixed at mount. The
+   * library re-resolves a grammar in place on `refresh()`, so a proxy onto the
+   * current build is what lets the list grow without rebuilding the editor,
+   * which would throw the undo history away.
    */
-  const [draft, setDraft] = useState(undefined)
-  const [open, setOpen] = useState(false)
-  const [active, setActive] = useState(0)
-  const [caret, setCaret] = useState(0)
-  const inputRef = useRef(null)
-  const layerRef = useRef(null)
-  const focused = useRef(false)
-  /** A caret to restore after the next render, for edits made without a mouse. */
-  const pendingCaret = useRef(undefined)
+  const grammarRef = useRef(undefined)
+  grammarRef.current = dshFontQueryGrammar({
+    catalogue,
+    enumerated,
+    styles,
+    shippedWeight,
+    // The vocabularies come from this plugin's own constants, so the editor
+    // cannot offer a family the plugin's own parser would then call unknown.
+    commonFamilies: COMMON_FAMILIES,
+    genericFamilies: GENERIC_FAMILIES,
+  })
+  const liveGrammar = useRef(
+    new Proxy({}, { get: (_target, key) => Reflect.get(grammarRef.current, key) }),
+  ).current
+  // The newest props, so the editor's own callbacks are never a render behind.
+  const latest = useRef({})
+  latest.current = { options, write: { onFamilies, onWeight }, setText }
 
-  const text = draft === undefined ? storedText : draft
-  const position = Math.min(Math.max(caret, 0), text.length)
-  const context = queryContextAt(text, position)
-  const suggestion = querySuggestions(context, { ...options, shippedWeight })
-  const parsed = parseFontQuery(text, options)
-  const tokens = fontQueryTokens(text, options)
-  /** The custom row is a completion too, so it takes part in keyboard travel. */
-  const rows =
-    suggestion.custom === undefined
-      ? suggestion.items
-      : [...suggestion.items, { id: 'custom', kind: 'custom', insert: suggestion.custom }]
-  const highlighted = clampHighlight(rows, active)
-  /** What the axis is set to — the setting, not the text being typed. */
+  useEffect(() => {
+    const host = hostRef.current
+    if (host === null || host === undefined) return undefined
+    const editor = createEditor(host, {
+      grammar: liveGrammar,
+      // Read once, at construction: later external values go through the effect
+      // below, which is the only place that decides whether one wins.
+      value: stored.text,
+      ariaLabel: label,
+      // No placeholder. A ghost of the shipped stack in an empty box reads as a
+      // value the plugin put there; the hint above the field is the example.
+      //
+      // 32px to 120px, which is what the field this replaces was bounded by: one
+      // row of the type above, and four before the box scrolls rather than
+      // pushing the rest of the settings off the panel.
+      sizing: { minRows: 1, minHeight: 32, maxHeight: 120 },
+      variables: EDITOR_VARIABLES,
+      // A family explains itself on hover, including the faces read off this
+      // machine — which is the question the old popup answered by listing them.
+      hover: { enabled: true, delay: 140 },
+      onChange: (next) => {
+        const current = latest.current
+        current.setText(next)
+        applyFontQuery(next, current.options, current.write)
+      },
+    })
+    editorRef.current = editor
+
+    /**
+     * The keyboard's reorder, kept from the field this replaces.
+     *
+     * Order is significant — the first family the browser can resolve wins — and
+     * this moves the entry the caret sits in without the pointer. The library's
+     * own handler may have moved a completion row first, which costs nothing: the
+     * text is about to change underneath it.
+     */
+    const onKeyDown = (event) => {
+      const current = latest.current
+      const moved = reorderFontQueryEntry(editor, event, current.options, current.write)
+      if (moved !== undefined) current.setText(moved.text)
+    }
+    editor.input.addEventListener('keydown', onKeyDown)
+
+    return () => {
+      editor.input.removeEventListener('keydown', onKeyDown)
+      editor.destroy()
+      editorRef.current = undefined
+    }
+  }, [])
+
+  // The catalogue arrives after this row mounts, so the grammar the editor is
+  // running is REFRESHED when it changes — re-read, never rebuilt, because a
+  // rebuild is what would throw the undo history away.
+  useEffect(() => {
+    const editor = editorRef.current
+    if (editor === undefined) return
+    editor.refresh()
+  }, [catalogue, styles, enumerated])
+
+  // A value that arrived from elsewhere — the Reset button, another tab — takes
+  // the field over. Our own write coming back does not, and neither does
+  // anything at all while the user is in the field: that would be the plugin
+  // rewriting their typing.
+  //
+  // The comparison is by MEANING rather than by characters, because the setting
+  // holds the canonical serialization of what the box says: a value that spells
+  // the same stack differently is the same value, and adopting it would rewrite
+  // the user's spelling — quoting, spacing, case — under their eyes.
+  useEffect(() => {
+    const editor = editorRef.current
+    if (editor === undefined) return
+    if (editor.focused) return
+    const read = parseFontQuery(editor.value, latest.current.options)
+    if (asQuery(read.families, read.weight ?? weight, shippedWeight) === stored.text) return
+    editor.setValue(stored.text)
+    setText(stored.text)
+  }, [stored.text])
+
+  const read = parseFontQuery(text, options)
   const appliedWeight = normalizeWeight(weight)
-  /** A query that says nothing about a family is an unfinished edit. */
-  const unfilled = parsed.families.length === 0 && parsed.weight === undefined
-  // The text carries something the setting does not (yet). Compared by MEANING,
-  // so lowercase or unquoted input is not reported as "not applied".
-  const pendingText =
-    draft === undefined ? undefined : asQuery(parsed.families, parsed.weight ?? weight)
-  const pending = pendingText !== undefined && pendingText !== storedText
-  const effectiveFamily =
-    parsed.effective >= 0 ? parsed.families[parsed.effective].toLowerCase() : undefined
-  const typed = context.inner.trim()
-
-  const messages = parsed.diagnostics
+  /** A query that names no family is an unfinished edit, and writes nothing. */
+  const unfilled = read.families.length === 0
+  const messages = read.diagnostics
     .map((diagnostic) => ({
       text: describeDiagnostic(diagnostic, labels),
       kind: diagnosticKind(diagnostic.code),
     }))
     .filter((message) => message.text !== '')
-  if (parsed.families.length > 0 && !parsed.families.some((f) => isGenericFamilyName(f.toLowerCase()))) {
+  if (read.families.length > 0 && !read.families.some((f) => isGenericFamilyName(f.toLowerCase()))) {
     messages.push({ text: labels.genericWarning, kind: 'warn' })
-  }
-
-  // The auto-height and the caret both belong to the render *after* the one that
-  // changed the text: a controlled textarea cannot be given a selection range in
-  // the same tick as the value it refers to.
-  useEffect(() => {
-    const node = inputRef.current
-    if (node === null || node === undefined) return
-    node.style.height = 'auto'
-    node.style.height = `${String(Math.min(node.scrollHeight, 120))}px`
-    const wanted = pendingCaret.current
-    if (wanted === undefined) return
-    pendingCaret.current = undefined
-    const clamped = Math.min(wanted, node.value.length)
-    node.focus()
-    node.setSelectionRange(clamped, clamped)
-    setCaret(clamped)
-  }, [text])
-
-  // A value that arrived from elsewhere — the Reset button, another tab — takes
-  // the field over. Our own write coming back does not: it means the same thing
-  // as the text on screen, and replacing the text then would be the plugin
-  // rewriting the user's typing. Nor does anything interrupt a focused field.
-  useEffect(() => {
-    if (focused.current) return
-    setDraft((current) => {
-      if (current === undefined) return undefined
-      const read = parseFontQuery(current, options)
-      return asQuery(read.families, read.weight ?? weight) === storedText ? current : undefined
-    })
-  }, [storedText])
-
-  /**
-   * Apply a query: parse it and write the settings fields it names.
-   *
-   * The text is NOT touched — not quoted, not reordered, not tidied. A query
-   * that names no family is an unfinished edit and writes nothing, leaving the
-   * stored stack alone; a query that names a weight but no family still moves
-   * that axis, because a weight alone is a complete statement about it.
-   * @param raw - the text to apply.
-   */
-  const apply = (raw) => {
-    const read = parseFontQuery(raw, options)
-    if (read.families.length > 0) onFamilies(serializeFamilyList(read.families))
-    if (read.weight !== undefined) onWeight(read.weight)
-  }
-
-  /**
-   * Take one completion the user picked. This is the one place text is replaced
-   * without the user having typed the replacement, and it only ever runs from an
-   * explicit pick: a click on a row, or Tab on the highlighted one.
-   * @param row - the chosen suggestion row.
-   */
-  const accept = (row) => {
-    const next = applySuggestion(text, suggestion, row.insert, row.kind)
-    pendingCaret.current = next.caret
-    setDraft(next.text)
-    setCaret(next.caret)
-    setOpen(false)
-    setActive(0)
-    // A weight row is an instruction about that axis value, not just text: the
-    // shipped weight is implicit in the text, so the number has to travel with
-    // the row rather than be re-parsed out of the insertion.
-    const read = parseFontQuery(next.text, options)
-    if (read.families.length > 0) onFamilies(serializeFamilyList(read.families))
-    const nextWeight = row.weight ?? read.weight
-    if (nextWeight !== undefined) onWeight(nextWeight)
-  }
-
-  /** Move the caret's entry, which is the keyboard's reorder. */
-  const move = (delta) => {
-    const next = moveFontQueryEntry(text, position, delta)
-    if (next.text === text) return
-    pendingCaret.current = next.caret
-    setDraft(next.text)
-    setCaret(next.caret)
-  }
-
-  const trackCaret = (event) => {
-    const node = event.target
-    if (node !== null && node !== undefined && typeof node.selectionStart === 'number') {
-      setCaret(node.selectionStart)
-    }
-  }
-
-  const onKeyDown = (event) => {
-    if (event.altKey === true && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
-      event.preventDefault()
-      move(event.key === 'ArrowUp' ? -1 : 1)
-      return
-    }
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      event.preventDefault()
-      if (!open) {
-        setOpen(true)
-        return
-      }
-      setActive((current) => {
-        const last = Math.max(rows.length - 1, 0)
-        return event.key === 'ArrowDown'
-          ? Math.min(current + 1, last)
-          : Math.max(current - 1, 0)
-      })
-      return
-    }
-    if (event.key === 'Enter') {
-      event.preventDefault()
-      // Enter APPLIES, it never completes: transforming what was typed because
-      // the user pressed Enter is the rudest thing this control could do. Taking
-      // a suggestion is Tab (or a click), which are unambiguous requests for it.
-      setOpen(false)
-      apply(text)
-      return
-    }
-    if (event.key === 'Tab' && open && highlighted >= 0 && typed !== '') {
-      event.preventDefault()
-      accept(rows[highlighted])
-      return
-    }
-    if (event.key === 'Escape') {
-      if (open) setOpen(false)
-      // The one way back to the stored value: the user asks for their own text
-      // to be discarded.
-      else setDraft(undefined)
-    }
   }
 
   return React.createElement(
     'div',
     { className: 'dsh-font-query' },
-    React.createElement(
-      'div',
-      { className: 'dsh-font-queryBox' },
-      React.createElement(
-        'div',
-        { className: 'dsh-font-queryLayer', ref: layerRef, 'aria-hidden': 'true' },
-        tokens.map((token, index) =>
-          React.createElement(
-            'span',
-            { key: `${token.kind}-${String(index)}`, className: queryTokenClass(token, effectiveFamily) },
-            token.text,
-          ),
-        ),
-        // A zero-width space keeps the layer's last line box as tall as the
-        // textarea's: a trailing newline would otherwise collapse in the layer
-        // alone, and the box would jump as soon as one is typed.
-        '\u200b',
-      ),
-      React.createElement('textarea', {
-        ref: inputRef,
-        className: 'dsh-font-queryInput',
-        value: text,
-        rows: 1,
-        spellCheck: false,
-        autoComplete: 'off',
-        autoCorrect: 'off',
-        autoCapitalize: 'off',
-        // No placeholder: a ghost of the shipped stack in an empty box reads as
-        // a value the plugin put there. The hint above the field is the example.
-        role: 'combobox',
-        'aria-label': label,
-        'aria-expanded': open && rows.length > 0,
-        'aria-autocomplete': 'list',
-        onFocus: (event) => {
-          focused.current = true
-          setOpen(true)
-          trackCaret(event)
-        },
-        onBlur: () => {
-          focused.current = false
-          setOpen(false)
-          // A caret restored after this would pull focus straight back.
-          pendingCaret.current = undefined
-          // An untouched field writes nothing: the stored value is already what
-          // the settings hold, and a blur is not an edit.
-          if (draft !== undefined) apply(text)
-        },
-        onChange: (event) => {
-          const node = event.target
-          const raw = node.value
-          // Typed text goes in EXACTLY as typed. No comma is inserted, no quote
-          // is added, nothing is reordered: a control that edits your keystrokes
-          // is broken even when its guess would have been right.
-          setDraft(raw)
-          setCaret(typeof node.selectionStart === 'number' ? node.selectionStart : raw.length)
-          setOpen(true)
-          setActive(0)
-        },
-        onKeyDown,
-        onKeyUp: trackCaret,
-        onClick: trackCaret,
-        onSelect: trackCaret,
-        onScroll: (event) => {
-          const layer = layerRef.current
-          if (layer === null || layer === undefined) return
-          layer.scrollTop = event.target.scrollTop
-          layer.scrollLeft = event.target.scrollLeft
-        },
-      }),
-      open && rows.length > 0
-        ? React.createElement(
-            'ul',
-            { className: 'dsh-font-menu', role: 'listbox', 'aria-label': labels.list },
-            rows.map((row, index) =>
-              React.createElement(
-                'li',
-                {
-                  key: row.id,
-                  role: 'option',
-                  'aria-selected': index === highlighted,
-                  className: `dsh-font-option${index === highlighted ? ' dsh-font-optionActive' : ''}${row.kind === 'custom' ? ' dsh-font-optionCustom' : ''}`,
-                  // `onMouseDown` beats the textarea's blur, so a pick is not
-                  // lost to the commit that blur would otherwise run first.
-                  onMouseDown: (event) => {
-                    event.preventDefault()
-                    accept(row)
-                  },
-                  onMouseEnter: () => {
-                    setActive(index)
-                  },
-                },
-                row.kind === 'weight'
-                  ? [
-                      React.createElement(
-                        'span',
-                        { key: 'key', className: 'dsh-font-optionKey' },
-                        `${row.family} ${row.word}`,
-                      ),
-                      React.createElement(
-                        'span',
-                        { key: 'detail', className: 'dsh-font-optionDetail' },
-                        labels.weightName(row.weight),
-                      ),
-                    ]
-                  : row.kind === 'custom'
-                    ? `${labels.add}: "${row.insert}"`
-                    : [
-                        React.createElement(
-                          'span',
-                          { key: 'key', className: 'dsh-font-optionKey' },
-                          row.name,
-                        ),
-                        React.createElement(
-                          'span',
-                          { key: 'detail', className: 'dsh-font-optionDetail' },
-                          row.kind === 'generic' ? labels.generic : labels.font,
-                        ),
-                      ],
-              ),
-            ),
-          )
-        : null,
-    ),
+    // The editor mounts here, from the effect above. React never renders the
+    // field itself: a textarea whose value React rewrites is the bug this whole
+    // migration is about.
+    React.createElement('div', { className: 'dsh-font-editor', ref: hostRef }),
+    // What the SETTINGS hold, in canonical form. The box is allowed to spell it
+    // differently — it is the user's text — so this is the line that says what
+    // the stack actually is.
     React.createElement(
       'div',
       { className: 'dsh-font-meta' },
       React.createElement(
         'span',
         { className: monospace === true ? 'dsh-font-hint dsh-font-code' : 'dsh-font-hint' },
-        `font-family: ${serializeFamilyList(storedFamilies)}`,
+        `font-family: ${serializeFamilyList(stored.families)}`,
       ),
     ),
     // The value the axis is SET to — not what the text parses to. Nothing here
-    // pretends the typed query has been applied: that is what the line below is
-    // for, and it is why clearing the field cannot change the readout.
+    // pretends the typed query has been applied: the setting follows every
+    // change, and this line is the value in force.
     React.createElement(
       'div',
       { className: 'dsh-font-hint' },
@@ -2194,21 +1763,18 @@ function FontQueryEditor({
       }`,
     ),
     // An unfinished edit is reported, never "corrected": the stored stack is
-    // still in use, and the text is left exactly as it was typed. There is
-    // nothing to apply either, so the pending line stays out of it.
-    unfilled && draft !== undefined
-      ? React.createElement('div', { className: 'dsh-font-hint' }, labels.emptyQuery)
-      : null,
-    pending && !unfilled
-      ? React.createElement('div', { className: 'dsh-font-pending' }, labels.pending)
-      : null,
+    // still in use, and the text is left exactly as it was typed.
+    unfilled ? React.createElement('div', { className: 'dsh-font-hint' }, labels.emptyQuery) : null,
+    // The library marks the same problems in the box, and explains a token on
+    // hover, but its words are English only. This list is the field's own
+    // explanation, in the interface's language, and it is the one the reader is
+    // owed when something is wrong.
     messages.map((message, index) =>
       React.createElement(
         'div',
         {
           key: `${String(index)}`,
-          className:
-            message.kind === 'error' ? 'dsh-font-warn dsh-font-error' : 'dsh-font-warn',
+          className: message.kind === 'error' ? 'dsh-font-warn dsh-font-error' : 'dsh-font-warn',
         },
         message.text,
       ),
@@ -2318,17 +1884,15 @@ function FontRow({ t, useStore, setField, reset }) {
   /**
    * The editors' copy, resolved once per render so the components stay free of
    * the locale service and remain pure functions of their props.
+   *
+   * Only what the plugin still says is here. The completion list, the tooltips,
+   * and the syntax colours are the library's now, and so are its words.
    * @param weightLine - the axis's weight label (`代码字重` / `界面字重`).
    * @returns the label bag both {@link FontQueryEditor}s consume.
    */
   const editorLabels = (weightLine) => ({
-    list: t('font.suggestions'),
-    add: t('font.add'),
-    font: t('font.familyKind'),
-    generic: t('font.genericKind'),
     weightLine,
     weightShipped: t('font.weightShipped'),
-    pending: t('font.pending'),
     emptyQuery: t('font.emptyQuery'),
     genericWarning: t('font.genericWarning'),
     unknownFamily: t('font.diag.unknownFamily'),
@@ -2362,7 +1926,8 @@ function FontRow({ t, useStore, setField, reset }) {
         enumerated: catalog.enumerated,
         label: t('font.uiFamily'),
         labels: editorLabels(t('font.uiWeight')),
-        // A commit that resolves to what is already stored writes nothing: the
+        // The editor reports every change, so these run on each keystroke. A
+        // write that resolves to what is already stored writes nothing: the
         // settings document is durable, and a no-op round trip is still a write.
         onFamilies: (value) => {
           if (value !== uiFontFamily) setField(UI_FONT_FAMILY_FIELD, value)
