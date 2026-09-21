@@ -48,20 +48,71 @@ const ENVELOPE_EXPORTS = [
   'normalizeWeight',
   'weightWord',
   'faceWeights',
+  'GENERIC_FAMILIES',
+  'COMMON_FAMILIES',
   'emphasisWeight',
   'parseFontQuery',
-  'fontQueryTokens',
   'serializeFontQuery',
-  'queryContextAt',
-  'querySuggestions',
-  'applySuggestion',
+  'asQuery',
+  'storedQuery',
+  'applyFontQuery',
   'moveFontQueryEntry',
-  'queryTokenClass',
-  'clampHighlight',
+  'reorderFontQueryEntry',
   'describeDiagnostic',
-  'rankFamilyMatches',
+  'diagnosticKind',
+  'dshFontQueryGrammar',
   'FontQueryEditor',
 ]
+
+/**
+ * Third-party modules compiled INTO the bundle, by specifier.
+ *
+ * DSH's shell seeds a fixed module table, so a plugin may only `import` a
+ * platform singleton. The documented route for anything else is
+ * `dsh.client.external` plus a second client bundle the plugin ships — which
+ * means another `<script>`, another roster row, and a host that has to cooperate
+ * in loading it. The host also ignores an `external` entry whose supplier is not
+ * an active plugin row, so the mistake surfaces only at runtime in the browser.
+ *
+ * A single-file bundle is easier to trust, so the editor engine is compiled in
+ * instead. Its built ESM is self-contained — no imports of its own — which makes
+ * inlining it a matter of stripping the one `export` statement at the end and
+ * handing the names back. The cost is real and worth stating: this bundle grows
+ * by the engine's whole compiled size, and the engine's own test suite and
+ * browser harness are what cover its behaviour from here on.
+ *
+ * ONE entry, and that is the point. The engine is generic — it ships no syntax at
+ * all — so there is no second module to inline: this plugin's own language lives
+ * in `src/font-grammar.js` (see {@link LOCAL_MODULES}).
+ *
+ * The dependency is a devDependency, because the code it contributes is copied
+ * in here and is not resolved from `node_modules` at runtime — not on the host,
+ * and not in the browser.
+ */
+const VENDORED = new Map([['@citisen/litearea', 'dist/index.js']])
+
+/**
+ * This plugin's own modules compiled INTO the bundle, by the relative specifier
+ * the template imports them with.
+ *
+ * The font-query grammar describes this plugin's language, so it belongs to this
+ * plugin and not to the editor engine — a library that shipped every consumer's
+ * grammar would force every consumer to bundle every language. It is still
+ * compiled in rather than loaded, and with no bundler that means splicing the
+ * module's own source in ABOVE the template.
+ *
+ * Splicing rather than wrapping is what keeps the module's names at the top
+ * level: `ENVELOPE_EXPORTS` re-exports them, and `stripExports` strips the
+ * module's `export` keywords with the template's, so a declaration in either file
+ * can be named there. The module therefore shares the template's scope, which is
+ * deliberate — it reads the parser's constants and helpers in that scope instead
+ * of restating them, and that is what stops the two from drifting.
+ */
+const LOCAL_MODULES = new Map([['./font-grammar.js', 'src/font-grammar.js']])
+
+
+/** The trailing `export { … }` a bundled ESM module ends with. */
+const EXPORT_BLOCK = /\nexport \{([\s\S]*?)\};?\s*$/
 
 /**
  * `import [default][, { named }] from 'spec'`, with no nested braces.
@@ -98,6 +149,94 @@ function aliasFor(spec) {
 }
 
 /**
+ * The declaration that compiles one vendored module into the envelope.
+ *
+ * The module is wrapped in its own function scope so its top-level names cannot
+ * collide with the template's, and its body is left exactly as published — not
+ * re-indented — so a reader debugging the bundle sees what the package actually
+ * shipped.
+ * @param spec - the specifier the template imported.
+ * @param file - the built file, relative to that package's root.
+ * @returns the declaration line.
+ * @throws {Error} when the package is not installed or its output is not
+ *   inlinable.
+ */
+function vendorDeclaration(spec, file) {
+  const packageDir = spec.startsWith('@')
+    ? spec.split('/').slice(0, 2).join('/')
+    : (spec.split('/')[0] ?? spec)
+  const path = join(root, 'node_modules', packageDir, file)
+  let source
+  try {
+    source = readFileSync(path, 'utf8')
+  } catch {
+    throw new Error(
+      `build-client: ${spec} is not installed (${path} is missing); run \`npm install\``,
+    )
+  }
+  // A source map reference would point at a map the bundle has no relationship
+  // with. Every one is removed rather than the last: the built file carries the
+  // comment twice, which is a quirk of the bundler's output, and a strip that
+  // assumed one occurrence left the other sitting between the module and its
+  // `export`.
+  const withoutMap = source.replace(/(?:\r?\n)?\/\/# sourceMappingURL=.*/g, '').trimEnd()
+  const block = EXPORT_BLOCK.exec(withoutMap)
+  if (block === null) {
+    throw new Error(
+      `build-client: ${spec} does not end in a single \`export { … }\` statement, so it cannot be compiled in`,
+    )
+  }
+  const bindings = (block[1] ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '')
+    .map((entry) => {
+      // `local as exported`, or a name that is already both.
+      const parts = entry.split(/\s+as\s+/)
+      const local = parts[0] ?? ''
+      const exported = parts[1] ?? local
+      return `${exported}: ${local}`
+    })
+  if (bindings.length === 0) {
+    throw new Error(`build-client: ${spec} exports nothing`)
+  }
+  return `\t\tlet ${aliasFor(spec)} = (function () {\n${withoutMap.slice(0, block.index).trimEnd()}\n\t\treturn { ${bindings.join(', ')} };\n\t\t})();\n`
+}
+
+/**
+ * Splice this plugin's own modules in above the template.
+ *
+ * Only the modules the template actually asks for are read, so an unused entry
+ * costs nothing and an import left dangling is caught by {@link rewriteImports}
+ * rather than silently ignored. Each module is spliced in whole, at its own
+ * indentation and with its `export` keywords intact: `stripExports` removes
+ * those for the whole compiled body, which is what lets {@link ENVELOPE_EXPORTS}
+ * name a declaration made in either file.
+ * @param template - the template source.
+ * @returns the template, with the requested modules above it.
+ * @throws {Error} when a requested module is missing or exports nothing.
+ */
+function inlineLocalModules(template) {
+  const parts = []
+  for (const [spec, file] of LOCAL_MODULES) {
+    if (!template.includes(`from '${spec}'`)) continue
+    const path = join(root, file)
+    let source
+    try {
+      source = readFileSync(path, 'utf8')
+    } catch {
+      throw new Error(`build-client: ${spec} is missing (${path} is missing); the import site in src/client.js names it`)
+    }
+    if (!/^export /m.test(source)) {
+      throw new Error(`build-client: ${spec} exports nothing for the envelope to re-export`)
+    }
+    parts.push(source.trimEnd())
+  }
+  if (parts.length === 0) return template
+  return `${parts.join('\n\n')}\n\n${template}`
+}
+
+/**
  * Rewrite every static import into a `let <alias> = require('<spec>')`
  * binding, exactly as the shipped bundles are emitted.
  * @param source - the template source.
@@ -113,6 +252,12 @@ function rewriteImports(source) {
     const groups = args.at(-1)
     const { default: defaultName, named, spec } = groups
     matched += 1
+
+    // A module of this plugin's own is spliced in ABOVE, so its declarations are
+    // already in this scope and must survive `qualifyImports` untouched: nothing
+    // is registered as a binding here, and the import site becomes a note.
+    if (LOCAL_MODULES.has(spec)) return `\t\t// ${spec} is compiled in above`
+
     requested.push(spec)
 
     const generated = aliasFor(spec)
@@ -136,6 +281,10 @@ function rewriteImports(source) {
       }
       namedBindings.push([spec, trimmed])
     }
+    // A compiled-in module declares its alias in the prelude instead of asking
+    // the module table for it, so the import site becomes a note rather than a
+    // `require`.
+    if (VENDORED.has(spec)) return `\t\t// ${spec} is compiled in above`
     return `\t\tlet ${generated} = require(${JSON.stringify(spec)});`
   })
 
@@ -173,9 +322,6 @@ function qualifyImports(body, { namedBindings, defaultBindings }) {
  * layer, and the loader row.
  */
 const IDENTITY_PATTERN = /\/\* dsh:plugin-id \*\/\s*(['"])[^'"]*\1/
-
-/** The CSS namespace prefix. Purely cosmetic; never compared against npm. */
-const STYLE_PREFIX = 'dsh-font'
 
 /**
  * Substitute the template's identity declaration with the real package name.
@@ -224,9 +370,10 @@ function stripExports(body) {
 /**
  * Wrap the transformed source in the DSH client-bundle envelope.
  * @param body - transformed, export-stripped template source.
+ * @param prelude - the compiled-in module declarations, if any.
  * @returns the complete bundle text.
  */
-function wrap(body) {
+function wrap(body, prelude = '') {
   const exports = ENVELOPE_EXPORTS.map((name) => `\t\texports.${name} = ${name};`).join('\n')
   return `window.__ModuleLoader__.load({
 \tid: ${JSON.stringify(PACKAGE_NAME)},
@@ -234,7 +381,7 @@ function wrap(body) {
 \t\tvar module = { exports: {} };
 \t\tvar exports = module.exports;
 \t\tObject.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
-${body.trimEnd()}
+${prelude}${body.trimEnd()}
 ${exports}
 \t\treturn module.exports;
 \t}
@@ -249,19 +396,26 @@ ${exports}
  */
 function compile() {
   const template = readFileSync(sourcePath, 'utf8')
-  const { body, requested, namedBindings, defaultBindings } = rewriteImports(template)
+  const { body, requested, namedBindings, defaultBindings } = rewriteImports(
+    inlineLocalModules(template),
+  )
 
   for (const spec of requested) {
-    if (!PLATFORM_SINGLETONS.has(spec)) {
-      throw new Error(
-        `build-client: src/client.js imports "${spec}", which is not a platform singleton; declare it in dsh.client.external and ship it as its own client bundle`,
-      )
-    }
+    if (PLATFORM_SINGLETONS.has(spec) || VENDORED.has(spec)) continue
+    throw new Error(
+      `build-client: src/client.js imports "${spec}", which is not a platform singleton; declare it in dsh.client.external and ship it as its own client bundle, or compile it in via VENDORED`,
+    )
   }
+
+  const prelude = [...VENDORED]
+    .filter(([spec]) => requested.includes(spec))
+    .map(([spec, file]) => vendorDeclaration(spec, file))
+    .join('')
 
   return {
     bundle: wrap(
       substituteIdentity(qualifyImports(stripExports(body), { namedBindings, defaultBindings })),
+      prelude,
     ),
     requested,
   }
@@ -282,7 +436,7 @@ function build() {
   }
   writeFileSync(outputPath, bundle, 'utf8')
   console.log(
-    `build-client: wrote lib/client.js (${String(bundle.length)} bytes, requires ${requested.join(', ')})`,
+    `build-client: wrote lib/client.js (${String(bundle.length)} bytes, requires ${[...new Set(requested)].join(', ')})`,
   )
   return true
 }

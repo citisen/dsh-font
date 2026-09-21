@@ -58,10 +58,12 @@ Geist Mono medium, "Zhuque Fangsong (technical preview)", monospace
   would draw one glyph in the layer and two in the field, and a synthesized
   weight would differ between them. The readout line under the field is rendered
   in the axis's own font, so the family you picked is still visible there.
-- **Enter applies, it never completes.** The query is parsed and written on
-  <kbd>Enter</kbd> or when you leave the field; <kbd>Tab</kbd> (or a click) takes
-  the highlighted completion, which is the one case where the text is replaced —
-  because that is what picking a suggestion means.
+- **The setting follows every keystroke.** The editor owns its own text, so there
+  is nothing to submit: the query is parsed and written as you type, and the
+  readout under the field moves with it. <kbd>Tab</kbd> (or a click) takes the
+  highlighted completion, which is the one case where the text is replaced —
+  because that is what picking a suggestion means. <kbd>Enter</kbd> takes it too,
+  and otherwise leaves the text exactly as it stands.
 - **A wrong query is marked, not fixed.** A family this machine does not have, a
   weight the family lacks, an unclosed quote, a stray word: each is reported
   under the field, in warning or error colour, and the text is left as typed. An
@@ -406,12 +408,17 @@ and rewrites the static imports into `require` calls. It is deliberately narrow
 and fails the build on anything it cannot rewrite, because a hand-rolled client
 bundle has no bundler to catch a mistake.
 
-The only modules a browser half may request are the nine the shell seeds into
-its module table (`react`, `react/jsx-runtime`, `react-dom`,
+The only modules a browser half may request from the shell are the nine it seeds
+into its module table (`react`, `react/jsx-runtime`, `react-dom`,
 `react-dom/client`, `@deepseek-ai/cordis`, `@deepseek-ai/dsh-client-store`,
 `@deepseek-ai/dsh-client-ui-slots`, `@deepseek-ai/dsh-client-ui-primitives`,
-`@deepseek-ai/dsh-client-ui-dockkit`); anything else must be declared in
-`dsh.client.external` and shipped as its own graph row. The build enforces this.
+`@deepseek-ai/dsh-client-ui-dockkit`). Anything else is compiled in instead: a
+library through the `VENDORED` map, and this plugin's own `src/font-grammar.js`
+through `LOCAL_MODULES`, which splices it into `src/client.js`'s scope so the two
+share one set of constants. `dsh.client.external` is the other documented route,
+but it needs a second client bundle, a second roster row, and a host that
+cooperates; the host also silently ignores an entry whose supplier is not an
+active plugin row. The build enforces which route each specifier takes.
 
 `verify-profile.mjs` needs a dsh installation and an initialized profile, so it
 **skips** (exit 0) when neither is present — a clean CI runner has no dsh. Set
@@ -447,6 +454,7 @@ arrangement does and does not protect against.
 | `lib/index.js` | Host half: settings namespace, pre-paint injection. Loaded by the loader. |
 | `lib/client.js` | Browser half, **generated** from `src/client.js`. Served at `/plugins/@citisen/dsh-font/client.js`. |
 | `src/client.js` | Browser-half source. |
+| `src/font-grammar.js` | The font-query grammar, as a `@citisen/litearea` grammar. Splices into `src/client.js`. |
 | `cordis.patch.yml` | The profile layer this bundle contributes. |
 | `scripts/` | Build and verification scripts. |
 | `.github/workflows/stage.yml` | The CI half of the only publishing path. |
