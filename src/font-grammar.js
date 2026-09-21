@@ -718,8 +718,15 @@ export function dshFontQueryGrammar(options = {}) {
           // spelling the entry is written in, while their label and their insert
           // stay canonical: `"Geist Mono" b` is filtered by `"Geist Mono" bold`
           // and still reads and inserts as the family plus its weight.
-          const written = entry?.quoted === true
-          const asWritten = (name) => (written ? quoteFamily(name) : name)
+          //
+          // The CHARACTER matters as much as the fact. A family may be opened
+          // with either quote, and the needle carries whichever the user typed, so
+          // writing the serializer's `"` here left every single-quoted entry
+          // matching nothing at all — the same empty list, one spelling further
+          // out. The entry's own character is used; the label and the insert are
+          // free to ignore it, because the plugin still writes `"` itself.
+          const quote = entry?.quoted === true ? core.charAt(0) : ''
+          const asWritten = (name) => (quote === '' ? name : quote + name + quote)
           // A quoted entry is the case slicing cannot solve. The reader stopped
           // the family at the closing quote, and no cut of the raw core recovers
           // that boundary: the quotes stay on, so `"Geist Mono"` is looked up as
@@ -826,7 +833,7 @@ export function dshFontQueryGrammar(options = {}) {
           if (needle !== '' && exact === undefined && !isGenericName(needle.toLowerCase(), GENERICS)) {
             rows.push({
               label: inner,
-              filterText: written ? core : inner,
+              filterText: quote === '' ? inner : core,
               insert: inner,
               kind: 'custom',
               detail: 'as typed',
