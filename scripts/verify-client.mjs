@@ -1993,24 +1993,30 @@ assert.equal(rootProperties.get('--dsw-font-family'), section.uiFontFamily)
 // ── the 0.1.7 line: the entry's own configuration form ──────────────────────
 //
 // There the section is addressed by Loader entry id (`ui-font`, the row the
-// bundle patch inserts) and read through `configForms`, whose snapshot carries the
-// stored section rather than decoded fields. Values must reach the page, and
-// writes must reach the form — that is the whole of "settings work on 0.1.7".
+// bundle patch inserts) and read through `configForms`. Its snapshot carries the
+// settings in layers — `value` is what the entry runs with, `user` is the profile
+// patch the user edited — and a write lands in `user`. A row that read `value`
+// alone would paint the shipped fonts over the user's choice on every open, which
+// is exactly what shipped once. So both layers are modelled here, and the user's
+// layer is the one that must reach the page.
 {
   const formWrites = []
   const formOverrides = []
   const formSlots = []
-  let formValue = {
-    uiFontFamily: 'Inter Tight, sans-serif',
-    codeFontWeight: 500,
+  const running = {
+    uiFontFamily: 'Shipped Sans, sans-serif',
+    codeFontFamily: '"Shipped Mono", monospace',
     // A field no version of this plugin ever wrote: the decoder drops it.
     fromTheFuture: true,
   }
+  let userLayer = { uiFontFamily: 'Inter Tight, sans-serif', codeFontWeight: 500 }
 
   const form = {
     getSnapshot: () => ({
       status: 'ready',
-      value: formValue,
+      value: running,
+      base: running,
+      user: userLayer,
       revision: 4,
       writable: true,
       mode: 'host',
@@ -2021,7 +2027,7 @@ assert.equal(rootProperties.get('--dsw-font-family'), section.uiFontFamily)
     },
     set: (field, value) => {
       formWrites.push({ op: 'set', field, value })
-      formValue = { ...formValue, [field]: value }
+      userLayer = { ...userLayer, [field]: value }
       // A committed write folds its answer back into the shared mirror, which is
       // what notifies subscribers in the browser: without this the fixture would
       // only ever test the write half of the contract.
@@ -2030,8 +2036,8 @@ assert.equal(rootProperties.get('--dsw-font-family'), section.uiFontFamily)
     },
     unset: (field) => {
       formWrites.push({ op: 'unset', field })
-      const { [field]: _removed, ...kept } = formValue
-      formValue = kept
+      const { [field]: _removed, ...kept } = userLayer
+      userLayer = kept
       formListener?.()
       return Promise.resolve(true)
     },
@@ -2082,11 +2088,16 @@ assert.equal(rootProperties.get('--dsw-font-family'), section.uiFontFamily)
   assert.equal(
     formOverrides[0].tokens['--dsw-font-family'].light,
     'Inter Tight, sans-serif',
-    'the stored family must be painted, decoded through the form snapshot',
+    "the user's layer must win over the running value, not sit beside it",
+  )
+  assert.equal(
+    formOverrides[0].tokens['--ds-font-family-code'].light,
+    '"Shipped Mono", monospace',
+    'a field the user did not override must still come from the running config',
   )
 
   // A change pushed by the Host repaints: the form subscription is live.
-  formValue = { ...formValue, uiFontFamily: '"Geist Mono", monospace' }
+  userLayer = { ...userLayer, uiFontFamily: '"Geist Mono", monospace' }
   formListener()
   assert.equal(
     formOverrides.at(-1).tokens['--dsw-font-family'].light,
