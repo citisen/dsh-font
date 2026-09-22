@@ -2,6 +2,60 @@
 
 [English](README.md) | 中文
 
+## dsh 起不来怎么办
+
+你正在看的报错就是这三行 ——
+
+    Failed to load plugins
+    web boot: 3 entries did not activate
+    @citisen/dsh-font: pending (waiting for service: settingsScope)
+
+「启用的条目却始终不激活」在 dsh 里算**启动失败**而不是警告：它会拒绝完成启动，而不是少个插件
+照常起来。三条出路，从快到慢，**三条都在 dsh 起不来的情况下可用**。本插件在 profile 里的行是
+`id: font`，对应 `name: '@citisen/dsh-font'`。
+
+**1. 禁用它 —— 在 profile 自己的补丁层里加一条**
+（`$DSH_HOME/profiles/web/cordis.patch.yml`，这一层在所有 bundle 层之后应用）：
+
+    - id: font
+      disabled: true
+
+不用敲命令、不用联网、不用装东西；删掉这两行它就回来了。`dsh --profile web --dump-config`
+会打印组装后的树 —— 每个行的 id 和包名，不管它属于谁 —— 补丁生效时这一行会带
+`disabled: true`；它不加载任何插件，所以 dsh 起不来时也能用。
+
+**2. 只影响这一次启动，什么都不改** —— 把同样两行写进你自己的文件，当叠加层传进去：
+
+    dsh --profile web --patch ./no-font.yml web
+
+**3. 卸载它** —— 一条命令同时摘掉依赖和 bundle 层（`dsh.profile.bundles` 会按已安装状态自动
+对齐）。它只是转发给 profile 目录里的 pnpm，不组装 profile，所以 dsh 起不来时也能跑：
+
+    dsh plugin --profile web remove @citisen/dsh-font
+
+需要 `PATH` 上有 `pnpm`。没有的话，就手工从 `$DSH_HOME/profiles/web/package.json` 的
+`dsh.profile.bundles`（以及对应的 `dependencies`）里删掉包名。
+
+**或者先要一个能用的 dsh**：用官方模板起一个干净的 profile，它不带你装的任何 bundle：
+
+    dsh --profile rescue --from-default-profile web
+
+## 兼容性
+
+本构建面向 dsh **0.1.5-rc.x** 系列 —— 也就是当前的 `latest`（`0.1.5-rc.2`）和 `next`
+（`0.1.5-rc.3`）。dsh `0.1.7-alpha.1` 换掉了 Web 客户端的设置 API：本插件绑定的
+`settingsScope` 服务不存在了（替代它的是 `configForms`），宿主端的 `settings.register()`
+也一并消失。在那个版本上，字体行仍会按出厂默认值渲染，但读不到也存不下任何设置 —— 原因会打印
+在浏览器控制台和 dsh 日志里，而不是留给用户去猜。
+
+`0.2.1` 及更早的版本会一直等一个那个版本并不存在的服务，也就是本文件开头那次启动失败；从
+`0.2.2` 起它会正常激活，并把不匹配的原因直接说出来。两边任一都能解决：把 dsh 钉住
+（`npx @deepseek-ai/dsh@0.1.5-rc.2 web`，或 `@next`），或者换成支持新 API 的插件版本。
+
+**如果存在 `$DSH_HOME/settings.yaml.imported`，不要删它。** dsh 0.1.7 会把旧的
+`settings.yaml` 导入一次并改名，凡是它不认的 section（包括本插件的 `ui-font`）都只留在改名
+后的文件里 —— 那个文件是这些字体设置的唯一副本。
+
 在设置里自定义 DeepSeek Harness **Web 界面字体**：界面字体与代码字体两条字体栈（各带自己的字重），以及三条互相独立的字号轴。
 
 这是一个第三方 [dsh](https://github.com/deepseek-ai/deepseek-harness) profile bundle（插件包）。它是一个「双面」包：Node 半边负责持久化的设置命名空间与首屏绘制前的样式注入，浏览器半边负责实际绘制并注册设置项。

@@ -4,10 +4,11 @@ The runbook for changing the plugin and getting it to users. For the *why*
 behind the setup (and what it does not protect against), see
 [PUBLISHING.md](PUBLISHING.md).
 
-The next version to ship is **0.2.0** — the current published `latest` is
-`0.1.0`. `0.1.1` was staged from an earlier change and never approved; it should
-be **rejected** rather than approved, because approving it would publish it under
-`latest` and move the tag backwards.
+The next version to ship is **0.2.2** — the current published `latest` is
+`0.2.1`. It carries the compatibility release for dsh `0.1.7-alpha.1`, which
+replaced the Web client's settings service: the plugin now binds settings
+optionally and names the mismatch instead of waiting forever for a service that
+release does not have (see the README's Compatibility section).
 
 ## The short version
 

@@ -237,5 +237,24 @@ bareListeners.get('webserver/index-inject')(bareTable)
 assert.equal(bareTable.length, 1)
 assert.match(bareTable[0].text, /--dsh-font-ui-scale:1;/)
 
+// A settings service without `register` is a dsh whose settings model moved —
+// 0.1.7-alpha.1 replaced the API rather than renaming it. Registering is
+// impossible there, so the plugin's job is to say why, in its own words, instead
+// of leaving an opaque TypeError beside a boot audit about plugin activation.
+{
+  const errors = []
+  apply({
+    inject: (_deps, callback) => {
+      callback({ settings: {}, logger: { error: (message) => errors.push(message) } })
+    },
+    on: () => undefined,
+    get: () => undefined,
+  })
+  assert.equal(errors.length, 1, 'the unsupported settings API must be reported')
+  assert.match(errors[0], /settings\.register/)
+  assert.match(errors[0], /ui-font/)
+  assert.match(errors[0], /0\.1\.5-rc\.x/)
+}
+
 console.log('verify-host: OK — namespace registered, pre-paint script executed, injection row emitted')
 console.log(`verify-host: stylesheet ${String(sheet.length)} chars, script ${String(script.length)} chars`)
