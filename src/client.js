@@ -28,10 +28,6 @@
 
 import React, { useEffect, useRef, useState } from 'react'
 import { defineStore } from '@deepseek-ai/dsh-client-store'
-import {
-  IconChevronDownOutline14,
-  IconChevronUpOutline14,
-} from '@deepseek-ai/dsh-client-ui-primitives'
 import { createEditor } from '@citisen/litearea'
 import { dshFontQueryGrammar } from './font-grammar.js'
 
@@ -1791,6 +1787,43 @@ function FontQueryEditor({
 }
 
 /**
+ * The chevron the stepper's two buttons carry.
+ *
+ * Drawn here rather than taken from the design system's icon set. Those exports
+ * are named for their stroke weight, and the names moved between dsh lines —
+ * `IconChevronDownOutline14` on the 0.1.5-rc.x line, `IconChevronDownOutlineRegular`
+ * on 0.1.7 — where a name that is gone is not a missing picture but `undefined` as
+ * a component type. React then throws "Element type is invalid" while rendering
+ * this row, and the whole Fonts row disappears from the settings page with only a
+ * console error to say so. Two paths of `currentColor` cost nothing, take the
+ * surrounding colour and size from CSS, and cannot be renamed away by a dsh
+ * release.
+ *
+ * @param props - `up` selects the direction, `size` the glyph box in px.
+ * @returns the icon element.
+ */
+function FontChevron({ up = false, size = 9 }) {
+  return React.createElement(
+    'svg',
+    {
+      width: size,
+      height: size,
+      viewBox: '0 0 16 16',
+      fill: 'none',
+      xmlns: 'http://www.w3.org/2000/svg',
+      'aria-hidden': 'true',
+    },
+    React.createElement('path', {
+      d: up
+        ? 'M12 10L8.70711 6.70711C8.31658 6.31658 7.68342 6.31658 7.29289 6.70711L4 10'
+        : 'M4 6L7.29289 9.29289C7.68342 9.68342 8.31658 9.68342 8.70711 9.29289L12 6',
+      stroke: 'currentColor',
+      strokeWidth: 1,
+    }),
+  )
+}
+
+/**
  * A horizontal slider plus an exact stepper.
  * @param props - React props.
  * @returns the control element.
@@ -1825,7 +1858,7 @@ function SliderControl({ min, max, step, value, format, onChange, ariaLabel, inc
             onChange(Number((value - step).toFixed(2)))
           },
         },
-        React.createElement(IconChevronDownOutline14, { size: 9 }),
+        React.createElement(FontChevron),
       ),
       React.createElement('span', { className: 'dsh-font-stepValue' }, format(value)),
       React.createElement(
@@ -1839,7 +1872,7 @@ function SliderControl({ min, max, step, value, format, onChange, ariaLabel, inc
             onChange(Number((value + step).toFixed(2)))
           },
         },
-        React.createElement(IconChevronUpOutline14, { size: 9 }),
+        React.createElement(FontChevron, { up: true }),
       ),
     ),
   )

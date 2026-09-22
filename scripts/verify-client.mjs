@@ -117,9 +117,24 @@ const stubs = {
   '@deepseek-ai/cordis': {},
   '@deepseek-ai/dsh-client-store': storeModule,
   '@deepseek-ai/dsh-client-ui-slots': {},
+  // Deliberately NOT a permissive stand-in. The design system's icon names move
+  // between dsh lines (`IconChevronDownOutline14` on 0.1.5-rc.x,
+  // `IconChevronDownOutlineRegular` on 0.1.7), and a name that no longer exists
+  // arrives as `undefined` — which React renders as "Element type is invalid" and
+  // takes the whole settings row down with it. A stub that answered every name with
+  // a component is exactly why that shipped; this one refuses, so importing a
+  // platform component the shell may not have fails here instead of in a user's
+  // settings page.
   '@deepseek-ai/dsh-client-ui-primitives': new Proxy(
     {},
-    { get: (_target, key) => (key === 'then' ? undefined : () => null) },
+    {
+      get: (_target, key) => {
+        if (key === 'then') return undefined
+        throw new Error(
+          `the fixture provides no platform export named "${String(key)}" — a platform component that is undefined at runtime crashes the row it renders in`,
+        )
+      },
+    },
   ),
   '@deepseek-ai/dsh-client-ui-dockkit': {},
 }
