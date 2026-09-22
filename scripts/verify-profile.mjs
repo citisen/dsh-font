@@ -31,6 +31,16 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const OWN_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PACKAGE_NAME = JSON.parse(readFileSync(join(OWN_ROOT, 'package.json'), 'utf8')).name
 
+/**
+ * The one string that names this plugin's section on either dsh line: the Loader
+ * entry id on 0.1.7+, the registered namespace on the 0.1.5-rc.x line. Read from
+ * the host half, so a patch whose id drifts from the settings namespace fails
+ * here rather than in a user's profile.
+ */
+const { FONT_SETTINGS_NAMESPACE } = await import(
+  pathToFileURL(join(OWN_ROOT, 'lib', 'index.js')).href
+)
+
 const HOME = process.env.USERPROFILE ?? process.env.HOME ?? ''
 const DSH_HOME = process.env.DSH_HOME ?? (HOME === '' ? undefined : join(HOME, '.dsh'))
 
@@ -113,23 +123,27 @@ const entries = composeEntries(
   [...profile.layers.map((layer) => layer.patches), profile.patches],
   (message) => warnings.push(message),
 )
-const row = entries.find((entry) => entry.id === 'font')
+const row = entries.find((entry) => entry.id === FONT_SETTINGS_NAMESPACE)
 if (row === undefined) {
   throw new Error(
-    `verify-profile: the composed entry list has no "font" row; got [${entries.map((entry) => entry.id).join(', ')}]`,
+    `verify-profile: the composed entry list has no "${FONT_SETTINGS_NAMESPACE}" row; got [${entries.map((entry) => entry.id).join(', ')}]`,
   )
 }
 if (row.name !== PACKAGE_NAME) {
-  throw new Error(`verify-profile: row "font" names "${String(row.name)}", expected "${PACKAGE_NAME}"`)
+  throw new Error(
+    `verify-profile: row "${FONT_SETTINGS_NAMESPACE}" names "${String(row.name)}", expected "${PACKAGE_NAME}"`,
+  )
 }
 if (row.disabled === true) {
-  throw new Error('verify-profile: row "font" is disabled')
+  throw new Error(`verify-profile: row "${FONT_SETTINGS_NAMESPACE}" is disabled`)
 }
 if (warnings.length > 0) {
   console.warn(`verify-profile: loader patch warnings: ${warnings.join('; ')}`)
 }
 
-console.log(`verify-profile: OK — ${String(entries.length)} composed entries, "font" -> ${row.name}`)
+console.log(
+  `verify-profile: OK — ${String(entries.length)} composed entries, "${FONT_SETTINGS_NAMESPACE}" -> ${row.name}`,
+)
 
 // ── the browser roster ──────────────────────────────────────────────────────
 // `dsh-client-modules` composes the browser roster from the same loader entries

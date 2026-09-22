@@ -13,12 +13,12 @@ The three lines you are looking at are these —
 An enabled plugin row that never activates is a failed boot, not a warning: dsh refuses
 to finish starting rather than loading without the plugin. Three ways out, fastest
 first, and **all three work while dsh cannot start**. This plugin's row in the profile is
-`id: font`, for `name: '@citisen/dsh-font'`.
+`id: ui-font`, for `name: '@citisen/dsh-font'`.
 
 **1. Disable it — one entry in the profile's own patch layer**
 (`$DSH_HOME/profiles/web/cordis.patch.yml`, applied after every bundle layer):
 
-    - id: font
+    - id: ui-font
       disabled: true
 
 No command, no network, nothing to install, and deleting those two lines brings the row
@@ -48,22 +48,42 @@ carries none of your bundles:
 
 ## Compatibility
 
-This build targets the dsh **0.1.5-rc.x** line — today's `latest` (`0.1.5-rc.2`) and
-`next` (`0.1.5-rc.3`). dsh `0.1.7-alpha.1` replaced the Web client's settings API: the
-`settingsScope` service this plugin binds is gone (its replacement is `configForms`), and
-the Host's `settings.register()` went with it. On that release the Fonts row keeps
-rendering the shipped defaults, but nothing is read or saved — and the reason is named in
-the browser console and in the dsh log rather than left to guesswork.
+This build runs on both dsh lines: the **0.1.5-rc.x** line (today's `latest` and
+`next`) and **0.1.7-alpha.1**, whose settings model it also speaks. One string names
+this plugin's section on both — `ui-font` — because the 0.1.7 line keys settings by
+Loader entry id and this bundle's patch inserts the entry under that name, while the
+0.1.5 line registers the same name as a settings namespace.
 
-Up to `0.2.1` this plugin waited for a service that release does not have, which is the
-failed boot at the top of this file; from `0.2.2` it activates and reports the mismatch
-instead. Either side of the line fixes it: pin dsh (`npx @deepseek-ai/dsh@0.1.5-rc.2 web`,
-or `@next`), or install a build of this plugin that supports the new API.
+| what it reads | 0.1.5-rc.x | 0.1.7-alpha.1 |
+| --- | --- | --- |
+| the durable section | `settingsScope.bind({ namespace: 'ui-font' })` | `configForms.get('ui-font')`, over the entry's own `Config` |
+| the host contract | `settings.register('ui-font', schema)` | the exported `Config`, its fields marked `.volatile()` |
 
-**If `$DSH_HOME/settings.yaml.imported` exists, do not delete it.** dsh 0.1.7 imports the
-old `settings.yaml` once and renames it, and any section it does not recognize — this
-plugin's own `ui-font` section included — stays only in the renamed file. That file is the
-last copy of those font choices.
+Both are bound optionally, so a dsh that provides neither still activates: the plugin
+never sits `pending` — which blocks the boot outright — and never throws on activation.
+It runs on the shipped defaults, and the first control you touch says why nothing is
+saved. Up to `0.2.2` the plugin required the 0.1.5 service, so on
+`0.1.7-alpha.1` it was reported as an entry that "did not activate"; `0.2.3`
+speaks both lines.
+
+### Settings lost to the 0.1.7 rename
+
+dsh 0.1.7 imports a legacy `$DSH_HOME/settings.yaml` once — each section into the entry
+of the same id — and renames the file to `settings.yaml.imported`. Before
+`0.2.3` this plugin's entry was named `font`, so a `ui-font` section had
+nowhere to go and stayed only in the renamed file. The names match now, so dsh's own
+import can put those values back:
+
+1. Copy `$DSH_HOME/settings.yaml.imported` to `$DSH_HOME/settings.yaml` (a copy, not a
+   move — the file is the only record until the import runs), and keep only the keys the
+   entry still declares: dsh validates the section against that entry's schema and refuses
+   the whole section over a single unknown key, so drop every key the table above does not
+   list.
+2. Start dsh 0.1.7 once with the profile you use. Every section whose entry now exists
+   — `ui-font` among them — is written into that profile's Cordis patch.
+3. A section dsh still does not recognize is reported and stays in
+   `settings.yaml.imported`, so **keep that file until you have what you need out of
+   it**.
 
 Customize the DeepSeek Harness **Web GUI fonts** from Settings: the interface
 and code font stacks (each with its weight) and three independent size axes.

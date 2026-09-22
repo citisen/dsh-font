@@ -4,11 +4,16 @@ The runbook for changing the plugin and getting it to users. For the *why*
 behind the setup (and what it does not protect against), see
 [PUBLISHING.md](PUBLISHING.md).
 
-The next version to ship is **0.2.2** — the current published `latest` is
-`0.2.1`. It carries the compatibility release for dsh `0.1.7-alpha.1`, which
-replaced the Web client's settings service: the plugin now binds settings
-optionally and names the mismatch instead of waiting forever for a service that
-release does not have (see the README's Compatibility section).
+The next version to ship is **0.2.3** — the published `latest` is `0.2.1`.
+
+`0.2.2` is staged and superseded by it: that release made the plugin survive dsh
+`0.1.7-alpha.1` without blocking the boot, but left the Fonts row read-only there.
+`0.2.3` speaks that line's settings model properly — the entry's exported `Config`
+with volatile fields, read and written through `configForms` — and renames the
+Loader row from `font` to `ui-font`, so one string names the section on both dsh
+lines (see the README's Compatibility section, including what that rename lets
+dsh's own legacy-settings import restore). **Reject the `0.2.2` stage** when
+staging this one; approving both would leave two stages for the same dist-tag.
 
 ## The short version
 

@@ -1612,6 +1612,14 @@ const settingsScopeService = {
   bind: (spec) => (assert.equal(spec.namespace, 'ui-font'), scope),
 }
 
+/**
+ * The services this fixture's composition provides, as cordis would resolve them.
+ *
+ * This is the 0.1.5-rc.x line: a registered namespace scope, and no configuration
+ * form. The case at the end of this file hands the plugin the other line instead.
+ */
+const services = { settingsScope: settingsScopeService }
+
 const ctx = {
   effect: (execute) => {
     execute()
@@ -1622,19 +1630,17 @@ const ctx = {
     if (name === 'theme') {
       return { overrideTokens: (source, tokens) => themeOverrides.push({ source, tokens }) }
     }
-    if (name === 'settingsScope') return settingsScopeService
-    return undefined
+    return services[name]
   },
-  // The optional bind under test: the service is present here, so the callback
-  // runs as it does in the browser. `settingsScope` stays on the fixture context
-  // as well, because that is the context a bound scope is read from.
+  // Cordis runs an injection only when the composition provides every dependency,
+  // so the fixture does the same. That is what makes handing it `configForms`
+  // instead a real test of the other line rather than of the same path twice.
   inject: (deps, callback) => {
-    assert.deepEqual(deps, ['settingsScope'])
-    callback(ctx)
-    return { dispose: () => undefined }
+    if (!deps.every((dep) => services[dep] !== undefined)) return { dispose: () => undefined }
+    return callback(ctx) ?? { dispose: () => undefined }
   },
   locale,
-  settingsScope: settingsScopeService,
+  ...services,
   slots: {
     inject: (name, callback) => {
       assert.equal(name, 'settings.general.item')
@@ -1917,46 +1923,34 @@ rootProperties.clear()
 scopeListener()
 assert.equal(rootProperties.get('--dsw-font-family'), section.uiFontFamily)
 
-// ── a composition that provides no `settingsScope` ──────────────────────────
+// ── a composition that speaks neither settings API ──────────────────────────
 //
-// dsh 0.1.7-alpha.1 replaced the Web client's settings service with
-// `configForms`. A build that required the old name never activated there at
-// all: the boot audit listed this plugin as an entry that "did not activate",
-// waiting for a service that release does not have. The service is optional now,
-// and this is the composition that must still produce a working row plus one
-// honest report — at activation, when the replacement service makes the mismatch
-// visible, and never twice.
+// The two known lines are `settingsScope` (0.1.5-rc.x) and `configForms` (0.1.7+).
+// A dsh with neither — a future rename, or a composition without the settings
+// domain at all — must still activate: an entry that never activates blocks the
+// web boot outright, which is how 0.1.7-alpha.1 turned a renamed service into a
+// "Failed to load plugins" card. The row stays on the shipped defaults, and the
+// first control the user touches is what reports why.
 {
-  const incompatibleSlots = []
-  const incompatibleDictionaries = []
+  const bareSlots = []
   const reported = []
-  const replacementOnlyCtx = {
+  const bareCtx = {
     effect: (execute) => {
       execute()
       return { dispose: () => undefined }
     },
     on: () => undefined,
-    // Only the REPLACEMENT service exists, which is what makes the mismatch
-    // visible without waiting for anything.
-    get: (name) => (name === 'configForms' ? {} : undefined),
-    inject: (deps) => {
-      assert.deepEqual(deps, ['settingsScope'])
-      // And it never arrives: this composition started without it.
-      return { dispose: () => undefined }
-    },
-    locale: {
-      register: (namespace, dict) => {
-        incompatibleDictionaries.push({ namespace, dict })
-        return () => undefined
-      },
-    },
+    get: () => undefined,
+    // Neither service is provided, so cordis never runs either injection.
+    inject: () => ({ dispose: () => undefined }),
+    locale: { register: () => () => undefined },
     slots: {
       inject: (name, callback) => {
         assert.equal(name, 'settings.general.item')
         callback()
       },
-      register: (options, component) => {
-        incompatibleSlots.push({ options, component })
+      register: (options) => {
+        bareSlots.push(options)
         return () => undefined
       },
     },
@@ -1965,24 +1959,135 @@ assert.equal(rootProperties.get('--dsw-font-family'), section.uiFontFamily)
   const realError = console.error
   console.error = (...args) => reported.push(args.join(' '))
   try {
-    plugin.apply(replacementOnlyCtx)
-    assert.equal(reported.length, 1, 'a visible mismatch is reported at activation')
-    // The writes the row offers must not throw on a scope that never resolves,
-    // and must not repeat a report the page already carries.
-    const actions = incompatibleSlots[0].options.inject(incompatibleSlots[0].options.store.create())
+    plugin.apply(bareCtx)
+    assert.deepEqual(reported, [], 'activation stays quiet: a composition may bind late')
+    const actions = bareSlots[0].inject(bareSlots[0].store.create())
     actions.setField('uiFontFamily', '"Geist Mono", monospace')
     actions.reset()
   } finally {
     console.error = realError
   }
 
-  assert.equal(incompatibleSlots.length, 1, 'the row must register without a settings service')
-  assert.equal(incompatibleDictionaries.length, 1, 'the row copy must register too')
-  assert.equal(reported.length, 1, 'the mismatch is reported once, not once per write')
-  assert.match(reported[0], /settingsScope/)
+  assert.equal(bareSlots.length, 1, 'the row must register without a settings service')
+  assert.equal(reported.length, 1, 'the first write reports, and only once')
   assert.match(reported[0], /configForms/)
-  assert.match(reported[0], /0\.1\.5-rc\.x/)
+  assert.match(reported[0], /settingsScope/)
   assert.match(reported[0], /@citisen\/dsh-font/)
+}
+
+// ── the 0.1.7 line: the entry's own configuration form ──────────────────────
+//
+// There the section is addressed by Loader entry id (`ui-font`, the row the
+// bundle patch inserts) and read through `configForms`, whose snapshot carries the
+// stored section rather than decoded fields. Values must reach the page, and
+// writes must reach the form — that is the whole of "settings work on 0.1.7".
+{
+  const formWrites = []
+  const formOverrides = []
+  const formSlots = []
+  let formValue = {
+    uiFontFamily: 'Inter Tight, sans-serif',
+    codeFontWeight: 500,
+    // A field no version of this plugin ever wrote: the decoder drops it.
+    fromTheFuture: true,
+  }
+
+  const form = {
+    getSnapshot: () => ({
+      status: 'ready',
+      value: formValue,
+      revision: 4,
+      writable: true,
+      mode: 'host',
+    }),
+    subscribe: (listener) => {
+      formListener = listener
+      return () => undefined
+    },
+    set: (field, value) => {
+      formWrites.push({ op: 'set', field, value })
+      formValue = { ...formValue, [field]: value }
+      // A committed write folds its answer back into the shared mirror, which is
+      // what notifies subscribers in the browser: without this the fixture would
+      // only ever test the write half of the contract.
+      formListener?.()
+      return Promise.resolve(true)
+    },
+    unset: (field) => {
+      formWrites.push({ op: 'unset', field })
+      const { [field]: _removed, ...kept } = formValue
+      formValue = kept
+      formListener?.()
+      return Promise.resolve(true)
+    },
+  }
+
+  let formListener
+  const formCtx = {
+    effect: (execute) => {
+      execute()
+      return { dispose: () => undefined }
+    },
+    on: () => undefined,
+    get: (name) =>
+      name === 'theme'
+        ? { overrideTokens: (source, tokens) => formOverrides.push({ source, tokens }) }
+        : undefined,
+    inject: (deps, callback) => {
+      if (!deps.includes('configForms')) return { dispose: () => undefined }
+      return callback(formCtx) ?? { dispose: () => undefined }
+    },
+    configForms: {
+      get: (entryId) => {
+        assert.equal(entryId, 'ui-font', 'the form is addressed by Loader entry id')
+        return form
+      },
+    },
+    locale: { register: () => () => undefined },
+    slots: {
+      inject: (name, callback) => {
+        assert.equal(name, 'settings.general.item')
+        callback()
+      },
+      register: (options) => {
+        formSlots.push(options)
+        return () => undefined
+      },
+    },
+  }
+
+  plugin.apply(formCtx)
+
+  assert.equal(formSlots.length, 1, 'the row must register against the 0.1.7 line')
+  assert.equal(formOverrides.length, 1, 'the stored section must reach the theme once')
+  assert.deepEqual(Object.keys(formOverrides[0].tokens).sort(), [
+    '--ds-font-family-code',
+    '--dsw-font-family',
+  ])
+  assert.equal(
+    formOverrides[0].tokens['--dsw-font-family'].light,
+    'Inter Tight, sans-serif',
+    'the stored family must be painted, decoded through the form snapshot',
+  )
+
+  // A change pushed by the Host repaints: the form subscription is live.
+  formValue = { ...formValue, uiFontFamily: '"Geist Mono", monospace' }
+  formListener()
+  assert.equal(
+    formOverrides.at(-1).tokens['--dsw-font-family'].light,
+    '"Geist Mono", monospace',
+  )
+
+  // And the row's writes land on the form, field by field, with reset clearing
+  // every field the plugin owns.
+  const actions = formSlots[0].inject(formSlots[0].store.create())
+  actions.setField('uiFontFamily', 'Georgia, serif')
+  actions.reset()
+  assert.deepEqual(formWrites[0], { op: 'set', field: 'uiFontFamily', value: 'Georgia, serif' })
+  assert.ok(
+    formWrites.filter((write) => write.op === 'unset').length >= 7,
+    'reset must clear every field this plugin owns',
+  )
 }
 
 delete globalThis.document
