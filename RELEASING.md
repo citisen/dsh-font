@@ -4,16 +4,33 @@ The runbook for changing the plugin and getting it to users. For the *why*
 behind the setup (and what it does not protect against), see
 [PUBLISHING.md](PUBLISHING.md).
 
-The next version to ship is **0.2.3** — the published `latest` is `0.2.1`.
+The next version to ship is **0.2.4** — the published `latest` is `0.2.2`.
 
-`0.2.2` is staged and superseded by it: that release made the plugin survive dsh
-`0.1.7-alpha.1` without blocking the boot, but left the Fonts row read-only there.
-`0.2.3` speaks that line's settings model properly — the entry's exported `Config`
-with volatile fields, read and written through `configForms` — and renames the
-Loader row from `font` to `ui-font`, so one string names the section on both dsh
-lines (see the README's Compatibility section, including what that rename lets
-dsh's own legacy-settings import restore). **Reject the `0.2.2` stage** when
-staging this one; approving both would leave two stages for the same dist-tag.
+`0.2.3` is staged and **must not be published**: it speaks both dsh lines' settings
+model — the entry's exported `Config` with volatile fields, read and written through
+`configForms`, under the Loader row `ui-font` — but three defects found by running it
+against a real `0.1.7-alpha.1` are fixed only in `0.2.4`:
+
+- It takes the stepper's two chevrons from the design system's icon set, whose exports
+  were renamed between dsh lines (`IconChevronDownOutline14` on 0.1.5-rc.x,
+  `…OutlineRegular` on 0.1.7). On 0.1.7 that arrives as an undefined component type, so
+  React throws "Element type is invalid" while rendering the row and **the whole Fonts
+  row disappears** with only a console error to say why. `0.2.4` draws those chevrons
+  inside the plugin, which is also why the client bundle now asks the shell for nothing
+  but `react` and `@deepseek-ai/dsh-client-store`.
+- It reads only the `value` layer of a `0.1.7` form. That line keeps settings in two:
+  `value` is what the entry runs with and `user` is the profile patch the user edited,
+  so every edit was displayed from the defaults on the next open and applied nothing.
+  `0.2.4` decodes the user's layer over the running one, which is what a built-in row
+  renders.
+- A completion accepted in a field with the editor — a font family, completed with Tab
+  or the mouse — moved the editor's text without announcing it, so the half-typed word
+  was what got saved. `0.2.4` reconciles the field on blur and on the way out, on top of
+  the fix in `@citisen/litearea@0.2.2` (now the pinned engine; the bundle inlines it).
+
+**Reject the `0.2.3` stage** before staging `0.2.4`; approving both would leave two
+stages for the same dist-tag, and approving `0.2.3` would ship all three defects.
+`0.2.2` is already published as `latest`.
 
 ## The short version
 

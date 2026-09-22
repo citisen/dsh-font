@@ -28,10 +28,6 @@
 
 import React, { useEffect, useRef, useState } from 'react'
 import { defineStore } from '@deepseek-ai/dsh-client-store'
-import {
-  IconChevronDownOutline14,
-  IconChevronUpOutline14,
-} from '@deepseek-ai/dsh-client-ui-primitives'
 import { createEditor } from '@citisen/litearea'
 import { dshFontQueryGrammar } from './font-grammar.js'
 
@@ -1640,6 +1636,18 @@ function FontQueryEditor({
   // The newest props, so the editor's own callbacks are never a render behind.
   const latest = useRef({})
   latest.current = { options, write: { onFamilies, onWeight }, setText }
+  /**
+   * The text the host was last told about.
+   *
+   * The field is the only thing that knows what the user sees, and an accepted
+   * completion moves it without announcing the move: the editor suppresses the
+   * change notification while it applies its own edit — the rule that keeps a host
+   * from being handed its own `setValue` back — so a family completed with Tab
+   * never reaches the store, and reopening the settings reads the half-typed word
+   * back. Holding the last text the host heard is what lets the field be
+   * reconciled with it.
+   */
+  const reported = useRef(stored.text)
 
   useEffect(() => {
     const host = hostRef.current
@@ -1671,11 +1679,31 @@ function FontQueryEditor({
       completion: { triggerCharacters: '' },
       onChange: (next) => {
         const current = latest.current
+        reported.current = next
         current.setText(next)
         applyFontQuery(next, current.options, current.write)
       },
     })
     editorRef.current = editor
+
+    /**
+     * Hand the host whatever the field holds, if the field moved without saying so.
+     *
+     * Called when the field loses focus and once more on the way out, which is the
+     * moment a settings dialog is closed and its last edit would otherwise be lost:
+     * type a family, accept the completion with Tab, close the panel, and the store
+     * would keep the half-typed word. The pinned editor announces an accepted
+     * completion as of 0.2.2; this reconciles either way, and it covers the other
+     * silent writes too — a paste, an undo, a completion accepted with the mouse.
+     */
+    const commit = () => {
+      if (editor.value === reported.current) return
+      const current = latest.current
+      reported.current = editor.value
+      current.setText(editor.value)
+      applyFontQuery(editor.value, current.options, current.write)
+    }
+    host.addEventListener('focusout', commit)
 
     /**
      * The keyboard's reorder, kept from the field this replaces.
@@ -1693,6 +1721,8 @@ function FontQueryEditor({
     editor.input.addEventListener('keydown', onKeyDown)
 
     return () => {
+      host.removeEventListener('focusout', commit)
+      commit()
       editor.input.removeEventListener('keydown', onKeyDown)
       editor.destroy()
       editorRef.current = undefined
@@ -1724,6 +1754,7 @@ function FontQueryEditor({
     const read = parseFontQuery(editor.value, latest.current.options)
     if (asQuery(read.families, read.weight ?? weight, shippedWeight) === stored.text) return
     editor.setValue(stored.text)
+    reported.current = stored.text
     setText(stored.text)
   }, [stored.text])
 
@@ -1791,6 +1822,43 @@ function FontQueryEditor({
 }
 
 /**
+ * The chevron the stepper's two buttons carry.
+ *
+ * Drawn here rather than taken from the design system's icon set. Those exports
+ * are named for their stroke weight, and the names moved between dsh lines —
+ * `IconChevronDownOutline14` on the 0.1.5-rc.x line, `IconChevronDownOutlineRegular`
+ * on 0.1.7 — where a name that is gone is not a missing picture but `undefined` as
+ * a component type. React then throws "Element type is invalid" while rendering
+ * this row, and the whole Fonts row disappears from the settings page with only a
+ * console error to say so. Two paths of `currentColor` cost nothing, take the
+ * surrounding colour and size from CSS, and cannot be renamed away by a dsh
+ * release.
+ *
+ * @param props - `up` selects the direction, `size` the glyph box in px.
+ * @returns the icon element.
+ */
+function FontChevron({ up = false, size = 9 }) {
+  return React.createElement(
+    'svg',
+    {
+      width: size,
+      height: size,
+      viewBox: '0 0 16 16',
+      fill: 'none',
+      xmlns: 'http://www.w3.org/2000/svg',
+      'aria-hidden': 'true',
+    },
+    React.createElement('path', {
+      d: up
+        ? 'M12 10L8.70711 6.70711C8.31658 6.31658 7.68342 6.31658 7.29289 6.70711L4 10'
+        : 'M4 6L7.29289 9.29289C7.68342 9.68342 8.31658 9.68342 8.70711 9.29289L12 6',
+      stroke: 'currentColor',
+      strokeWidth: 1,
+    }),
+  )
+}
+
+/**
  * A horizontal slider plus an exact stepper.
  * @param props - React props.
  * @returns the control element.
@@ -1825,7 +1893,7 @@ function SliderControl({ min, max, step, value, format, onChange, ariaLabel, inc
             onChange(Number((value - step).toFixed(2)))
           },
         },
-        React.createElement(IconChevronDownOutline14, { size: 9 }),
+        React.createElement(FontChevron),
       ),
       React.createElement('span', { className: 'dsh-font-stepValue' }, format(value)),
       React.createElement(
@@ -1839,7 +1907,7 @@ function SliderControl({ min, max, step, value, format, onChange, ariaLabel, inc
             onChange(Number((value + step).toFixed(2)))
           },
         },
-        React.createElement(IconChevronUpOutline14, { size: 9 }),
+        React.createElement(FontChevron, { up: true }),
       ),
     ),
   )
@@ -2167,11 +2235,33 @@ function decodeFontSection(section) {
 }
 
 /**
+ * The value a 0.1.7 configuration form is effectively holding.
+ *
+ * That line keeps settings in layers: `value` is what the entry is running with
+ * (its shipped or bundle-layer config) and `user` is the profile patch the user
+ * edits. This returns the user's layer over the running one — the value a built-in
+ * row renders.
+ *
+ * @param snapshot - a form snapshot.
+ * @returns the merged section, or whichever layer exists.
+ */
+function effectiveFormValue(snapshot) {
+  const running = snapshot.value
+  const user = snapshot.user
+  if (user === null || typeof user !== 'object') return running
+  if (running === null || typeof running !== 'object') return user
+  return { ...running, ...user }
+}
+
+/**
  * Present a dsh 0.1.7 configuration form as the scope this plugin reads.
  *
- * A form already answers `getSnapshot`/`subscribe`/`set`/`unset`/`mutate`, so the
- * only gap is its value: it reports the section as stored, and this plugin reads
- * decoded fields.
+ * A form already answers `getSnapshot`/`subscribe`/`set`/`unset`/`mutate`; the gap
+ * is what its snapshot means. It reports `value` and `user` separately, a write
+ * lands in `user`, and `value` stays on the shipped defaults — so reading `value`
+ * alone is reading the defaults. That is a row that forgets every edit the moment
+ * it is reopened, a control that will not move because the repaint after its own
+ * write shows the old value again, and a setting that never reaches the page.
  *
  * @param form - the configuration form for this plugin's entry.
  * @returns a scope-shaped object.
@@ -2180,7 +2270,7 @@ function decodedForm(form) {
   return {
     getSnapshot: () => {
       const snapshot = form.getSnapshot()
-      return { ...snapshot, value: decodeFontSection(snapshot.value) }
+      return { ...snapshot, value: decodeFontSection(effectiveFormValue(snapshot)) }
     },
     subscribe: (listener) => form.subscribe(listener),
     set: (field, value) => form.set(field, value),

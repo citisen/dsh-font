@@ -62,15 +62,25 @@ Loader entry id and this bundle's patch inserts the entry under that name, while
 Both are bound optionally, so a dsh that provides neither still activates: the plugin
 never sits `pending` — which blocks the boot outright — and never throws on activation.
 It runs on the shipped defaults, and the first control you touch says why nothing is
-saved. Up to `0.2.2` the plugin required the 0.1.5 service, so on
-`0.1.7-alpha.1` it was reported as an entry that "did not activate"; `0.2.3`
-speaks both lines.
+saved. Up to `0.2.2` the plugin required the 0.1.5 service, so on `0.1.7-alpha.1` it was
+reported as an entry that "did not activate"; `0.2.3` speaks both lines' settings, and
+`0.2.4` also stops it borrowing the design system's icons.
+
+That last one is worth stating plainly, because it is the failure mode a settings port
+hides. The design system's icon exports are named for their stroke weight and were
+renamed between dsh lines (`IconChevronDownOutline14` on 0.1.5-rc.x,
+`IconChevronDownOutlineRegular` on 0.1.7). An icon whose name is gone does not render as
+a missing picture: it arrives as `undefined` in place of a component type, so React
+throws "Element type is invalid" while rendering the row and **the whole Fonts row
+disappears from the settings page**, leaving one console error to explain it. The row
+draws its own chevrons now, which is why its client bundle asks the shell for nothing
+but `react` and `@deepseek-ai/dsh-client-store`.
 
 ### Settings lost to the 0.1.7 rename
 
 dsh 0.1.7 imports a legacy `$DSH_HOME/settings.yaml` once — each section into the entry
 of the same id — and renames the file to `settings.yaml.imported`. Before
-`0.2.3` this plugin's entry was named `font`, so a `ui-font` section had
+`0.2.4` this plugin's entry was named `font`, so a `ui-font` section had
 nowhere to go and stayed only in the renamed file. The names match now, so dsh's own
 import can put those values back:
 
