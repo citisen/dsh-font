@@ -73,8 +73,19 @@ renamed between dsh lines (`IconChevronDownOutline14` on 0.1.5-rc.x,
 a missing picture: it arrives as `undefined` in place of a component type, so React
 throws "Element type is invalid" while rendering the row and **the whole Fonts row
 disappears from the settings page**, leaving one console error to explain it. The row
-draws its own chevrons now, which is why its client bundle asks the shell for nothing
-but `react` and `@deepseek-ai/dsh-client-store`.
+borrows no icon now, and draws none of its own either — it is two text boxes, two number
+boxes, and a button — which is why its client bundle asks the shell for nothing but
+`react` and `@deepseek-ai/dsh-client-store`.
+
+### `0.3.0`: the conversation text size is gone
+
+Message bodies, headings, and tables are sized by dsh's own *Appearance → Font size* row
+again (`ui-theme` writes the inline `--dsh-content-font-size` the shipped ladder reads).
+`0.3.0` stopped writing that property and stopped re-deriving the Markdown ladder, so the
+Fonts row offers no conversation-size control at all and `contentFontSize` has left the
+schema — **if an older version of this plugin stored it, delete that key** from
+`$DSH_HOME/settings.yaml` or the profile's `cordis.patch.yml`: dsh validates the section
+against this entry's own schema and refuses the whole section over a single unknown key.
 
 ### Settings lost to the 0.1.7 rename
 
@@ -96,7 +107,7 @@ import can put those values back:
    it**.
 
 Customize the DeepSeek Harness **Web GUI fonts** from Settings: the interface
-and code font stacks (each with its weight) and three independent size axes.
+and code font stacks (each with its weight) and two independent size axes.
 
 This is a third-party [dsh](https://github.com/deepseek-ai/deepseek-harness)
 profile bundle. It ships as one dual-face package: a Node half that owns a
@@ -109,16 +120,27 @@ are present in the `latest` and `next` release channels.
 
 ## What it adds
 
-A **Fonts** row in *Settings → General*, with five fields: two font queries and
-three size axes.
+A **Fonts** row in *Settings → General*: two font-query fields, each with its own
+size box sitting after the query input.
 
 | Field | Effect | Value |
 | --- | --- | --- |
 | Interface font | `--dsw-font-family` — all non-code UI text | a font query: families, optionally with a weight |
+| Interface text size | the box beside it: scales every hard-coded UI text size | 75 – 150 (percent) |
 | Code font | `--ds-font-family-code` — code blocks, inline code, monospace | a font query |
-| Interface text size | Scales every hard-coded UI text size | 75% – 150%, step 5% |
-| Conversation text size | Message bodies, headings, and tables | 12 – 20 px |
-| Code text size | Code blocks and inline code | 10 – 20 px |
+| Code text size | the box beside it: code blocks and inline code | 10 – 20 px |
+
+The size is a native number input rather than a slider: type it, step it with the arrow
+keys or the browser's own spinner, and read the unit (`%` or `px`) inside the box. Only a
+**complete, in-range** number is written — a half-typed `1` on the way to `125` is not an
+instruction, so it neither writes a bad value nor gets re-rendered away — and leaving the
+box puts it back to what is stored, so a number that was refused cannot stay on screen
+looking as if it had been taken.
+
+**The conversation text size is not here.** Message bodies, headings, and tables have
+always been sized by dsh's own *Settings → Appearance → Font size* row (the `ui-theme`
+namespace); `0.3.0` removed the second control this row used to offer for it, and the
+plugin writes no `--dsh-content-font-size` of its own.
 
 Both font fields are **editors for a small font-query language**, not plain text
 inputs: the whole stack is one piece of text you edit directly, with syntax
@@ -167,9 +189,10 @@ Every value is saved through the host settings document
 (`$DSH_HOME/settings.yaml`, namespace `ui-font`), so settings survive a restart
 and are shared by every browser pointed at the same host.
 
-The *Interface text size* and *Conversation text size* axes are independent on
-purpose: bumping the interface makes the surrounding chrome easier to read
-without changing how much message text fits on screen, and vice versa.
+The *Interface text size* and *Code text size* axes are independent on purpose: bumping
+the interface makes the surrounding chrome easier to read without moving a line of message
+text, and the code size touches neither. Conversation text follows dsh's own setting
+alone.
 
 ### Choosing a weight: `Geist Mono medium`
 
@@ -226,23 +249,19 @@ the name, verbatim.
 ### The interface weight is opt-in
 
 The code surface has no weight hierarchy to preserve, so its weight is simply the
-one written in the query. The interface does have one: headings are 700, table
-heads 500, body 400. Setting an interface weight therefore moves the base and
-carries the heading steps with it, keeping each step's shipped distance from 400
-instead of flattening them:
+one written in the query. The interface does have one, which is why the interface
+weight is a single inherited base rather than a rewrite of every step:
 
 ```css
 /* --dsh-font-ui-weight: 500 */
 html body { font-weight: 500 }
---dsh-font-markdown-base: 500 …          /* body text */
---dsh-font-markdown-h1: 800 …            /* 700 + (500 - 400) */
---dsh-font-markdown-table-head: 600 …    /* 500 + (500 - 400) */
 ```
 
-Text that *inherits* its weight moves; a label or a button whose weight the
-design system fixes keeps it, because its own rule still wins. And the shipped
-400 emits **no rule at all**, so an untouched install paints exactly what the
-design system paints.
+Text that *inherits* its weight moves; anything whose weight the design system fixes
+— headings, table heads, buttons — keeps it, because its own rule still wins. The
+conversation's `font:` shorthands fix theirs too, and this plugin no longer restates
+that ladder, so message text is not rewritten either. And the shipped 400 emits **no
+rule at all**, so an untouched install paints exactly what the design system paints.
 
 ### The query language
 
@@ -407,27 +426,27 @@ the interface mounts new nodes.
 
 Stamping per element rather than using a universal rule is what keeps the two
 size axes independent: a `html body *` override would inherit into the
-conversation subtree and compound with the content size, and it would also
-rewrite decorative sizes (the SVG labels inside file-type icons) that nobody
-meant to scale. Measuring per element also means the plugin needs no knowledge
-of any component's class names, so it survives a UI refactor.
+conversation subtree and compound with the size dsh gives message text, and it
+would also rewrite decorative sizes (the SVG labels inside file-type icons) that
+nobody meant to scale. Measuring per element also means the plugin needs no
+knowledge of any component's class names, so it survives a UI refactor.
 
-### Where the conversation size is written
+### Why the conversation size is left alone
 
 `--dsh-content-font-size` is an **inline** custom property on `body`, written by
-`ui-layout` from the sibling `ui-theme` namespace (whose own Settings row offers
-12–17 px). An inline declaration outranks a stylesheet regardless of
-`!important`, so the plugin writes its value to exactly the same place:
+`ui-layout` from the sibling `ui-theme` namespace — the *Font size* row in
+Appearance. An inline declaration outranks a stylesheet regardless of `!important`,
+so taking that axis over meant writing to exactly the same place, and re-deriving
+the whole Markdown ladder on top of it:
 
 ```js
 document.body.style.setProperty('--dsh-content-font-size', `${contentSize}px`)
 ```
 
-The stylesheet then re-derives the whole Markdown ladder in absolute px from
-that value. `ui-theme` still owns the variable and still writes it on every
-theme change; the plugin re-asserts its own on every settings change. The row's
-help text tells the user this control wins over the *Font size* row in
-Appearance.
+The plugin no longer writes either, and no longer declares any `--dsh-font-markdown-*`
+token. Conversation text is sized, and its line-height derived, entirely by the
+design system from the user's setting in Appearance; this plugin keeps two axes, the
+interface scale and the code size, and each one stays inside its own subtree.
 
 ### Where the code weight is written
 
@@ -457,23 +476,17 @@ rule: the surrounding labels keep the shipped hierarchy.
 ### Where the interface weight is written
 
 The interface weight is opt-in, so the shipped `400` emits no rule at all and an
-untouched install paints exactly what the design system paints. Anything else is
-written on two levels:
+untouched install paints exactly what the design system paints. Anything else is one
+rule:
 
 ```css
-/* text that inherits its weight moves as a whole … */
+/* text that inherits its weight moves as a whole */
 html body { font-weight: 500 }
-
-/* … while the Markdown ladder the plugin already owns is shifted by the same
-   distance from the shipped 400, so headings keep their contrast */
---dsh-font-markdown-base: 500 …
---dsh-font-markdown-h1: 800 …            /* 700 + (500 - 400) */
---dsh-font-markdown-table-head: 600 …    /* 500 + (500 - 400) */
 ```
 
-The ladder has to name the weight explicitly: a `font:` shorthand with no weight
-component resets `font-weight` to `normal`, so `html body` alone would be
-cancelled by the plugin's own tokens.
+A heading, a table head, or a button whose weight the design system fixes keeps it,
+and so does anything styled by a `font:` shorthand — the conversation's own tokens
+included, which is the second reason this plugin leaves that ladder alone.
 
 ### Pre-paint
 
@@ -560,9 +573,9 @@ arrangement does and does not protect against.
 - **Hard-coded sizes only.** The interface scale only moves text that a shipped
   stylesheet fixes in px. It deliberately leaves display-size text and decorative
   glyph sizes alone, so a scale of 150% is not a uniform 1.5× of the whole UI.
-- **The conversation size overrides `ui-theme`'s font-size row.** Both write
-  `--dsh-content-font-size`; last write wins, and this plugin always writes on a
-  settings change. Use one or the other.
+- **The conversation size belongs to dsh.** Message bodies, headings, and tables
+  are sized by the *Font size* row in Appearance and by nothing else; the interface
+  scale moves the surrounding chrome, and the code size moves code.
 - **Fonts are not installed.** A family name is only used if the browser or OS
   can resolve it; the plugin does not bundle or download webfonts, so a typo
   falls back silently to the generic family at the end of the list.
@@ -586,9 +599,10 @@ arrangement does and does not protect against.
   discovered — both are curated, so this normally holds, but a name outside the
   probe list can be split when the Local Font Access prompt is declined. Quoting
   settles it: `"Book Antiqua"` is always the name.
-- **The heading shift is one formula, not a redesign.** Each step becomes
-  `shipped + (interface weight - 400)`, clamped at 900 — so an interface weight
-  of 900 flattens the ladder against that ceiling.
+- **The interface weight only moves what inherits it.** One `html body { font-weight: … }`
+  rule: headings, table heads, and buttons whose weight the design system fixes keep
+  theirs, and so does text styled by a `font:` shorthand — the conversation's own
+  tokens among them.
 - **The box is not a copy of the setting.** What is stored is the plugin's
   serialization of the query (quoted, weight word after the first family); what
   the box shows is your text, kept verbatim for as long as the row lives. A

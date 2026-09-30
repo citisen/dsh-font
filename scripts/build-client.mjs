@@ -50,7 +50,6 @@ const ENVELOPE_EXPORTS = [
   'faceWeights',
   'GENERIC_FAMILIES',
   'COMMON_FAMILIES',
-  'emphasisWeight',
   'parseFontQuery',
   'serializeFontQuery',
   'asQuery',

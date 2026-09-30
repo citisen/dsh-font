@@ -1,7 +1,7 @@
 {
   "name": "@citisen/dsh-font",
-  "version": "0.2.4",
-  "description": "DeepSeek Harness plugin: customize the Web GUI fonts (interface family, code family, and three font-size axes) from Settings",
+  "version": "0.3.0",
+  "description": "DeepSeek Harness plugin: customize the Web GUI fonts (interface family, code family, and two font-size axes) from Settings",
   "type": "module",
   "license": "MIT",
   "author": "citisen",

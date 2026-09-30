@@ -87,7 +87,6 @@ assert.equal(defaults.codeFontWeight, DEFAULT_CODE_FONT_WEIGHT)
 assert.equal(defaults.uiFontWeight, DEFAULT_UI_FONT_WEIGHT)
 assert.equal(DEFAULT_UI_FONT_WEIGHT, 400, 'the shipped interface weight is the design system base')
 assert.equal(defaults.uiFontScale, 1)
-assert.equal(defaults.contentFontSize, 14)
 assert.equal(defaults.codeFontSize, 12)
 
 // The weight is a closed vocabulary, not a free number: a weight no family is
@@ -105,17 +104,23 @@ assert.throws(() => FontSettingsSchema({ uiFontWeight: 550 }))
 assert.throws(() => FontSettingsSchema({ uiFontWeight: 'medium' }))
 
 // Out-of-range values must be rejected at the wire boundary.
-assert.throws(() => FontSettingsSchema({ contentFontSize: 99 }))
+assert.throws(() => FontSettingsSchema({ codeFontSize: 99 }))
 assert.throws(() => FontSettingsSchema({ uiFontScale: 0.1 }))
+// The conversation size is not this plugin's field on any line: it is the
+// `ui-theme` namespace's, and a section carrying it must not be validated here.
+assert.ok(!('contentFontSize' in defaults), 'the conversation size left this plugin')
 
-// The pre-paint sheet carries the scale and both size axes, one rule per
+// The pre-paint sheet carries the scale and the code size axis, one rule per
 // hard-coded UI text step — and the code weight, which the design system has no
 // token of its own for.
 const sheet = fontStyleSheet(defaults)
 assert.match(sheet, /--dsh-font-ui-scale:1;/)
-assert.match(sheet, /--dsh-font-content-size:14px/)
 assert.match(sheet, /--dsh-font-code-size:12px/)
 assert.match(sheet, /--dsh-font-code-weight:400;/)
+assert.ok(
+  !sheet.includes('--dsh-font-content-size:') && !sheet.includes('--dsh-font-conversation-size:'),
+  'the pre-paint sheet must not carry a conversation size',
+)
 assert.match(sheet, /font-size:calc\(14px \* var\(--dsh-font-ui-scale,1\)\) !important/)
 for (const step of [11, 12, 13, 14, 16, 20, 24]) {
   assert.ok(sheet.includes(`calc(${String(step)}px * `), `missing scale rule for ${String(step)}px`)
@@ -177,11 +182,10 @@ delete globalThis.document
 const custom = {
   ...defaults,
   uiFontScale: 1.25,
-  contentFontSize: 16,
   codeFontSize: 13,
   codeFontWeight: 500,
 }
-assert.match(fontStyleSheet(custom), /--dsh-font-content-size:16px/)
+assert.match(fontStyleSheet(custom), /--dsh-font-code-size:13px/)
 assert.match(fontStyleSheet(custom), /--dsh-font-code-weight:500;/)
 assert.match(fontStyleSheet(custom), /font-size:calc\(16px \* var\(--dsh-font-ui-scale,1\)\)/)
 assert.ok(fontBootstrapScript(custom).includes('--dsh-font-code-weight'))
