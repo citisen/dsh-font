@@ -187,7 +187,6 @@ assert.equal(Array.isArray(plugin.COMMON_FAMILIES), true, 'the curated families 
 for (const name of [
   'weightWord',
   'faceWeights',
-  'emphasisWeight',
   'parseFontQuery',
   'serializeFontQuery',
   'asQuery',
@@ -283,19 +282,23 @@ const section = {
   codeFontFamily: '"JetBrains Mono", monospace',
   codeFontWeight: 500,
   uiFontScale: 1.25,
-  contentFontSize: 16,
   codeFontSize: 13,
 }
 const sheet = plugin.fontStyleSheet(section)
 assert.match(sheet, /--dsh-font-ui-scale:1\.25;/)
 assert.match(sheet, /--dsh-font-code-size:13px;/)
 assert.match(sheet, /--dsh-font-code-weight:500;/)
-// The content size is an INLINE custom property on `body` (ui-layout's theme
-// presenter owns that declaration), so the sheet must not declare it — an
-// inline value would win and nothing here could override it.
+// Conversation text is not an axis this plugin owns any more: its size belongs to
+// `ui-theme`'s own Font size row, which writes `--dsh-content-font-size` inline on
+// `body` — and an inline value outranks a stylesheet, so a declaration here could
+// only ever be a second, losing answer.
 assert.ok(
-  !sheet.includes('--dsh-content-font-size:'),
-  'the sheet must not declare the inline-owned content size',
+  !sheet.includes('--dsh-content-font-size:') && !sheet.includes('--dsh-font-conversation-size:'),
+  'the sheet must not declare a conversation size',
+)
+assert.ok(
+  !/--dsh-font-markdown-/.test(sheet),
+  'the conversation ladder belongs to the design system, not to this plugin',
 )
 assert.match(sheet, /\.dsh-font-size-14\{font-size:calc\(14px \* var\(--dsh-font-ui-scale,1\)\) !important\}/)
 for (const step of [11, 12, 13, 14, 16, 20, 24]) {
@@ -307,9 +310,6 @@ assert.ok(
   'the scale must not be a universal rule (it would compound with the content size)',
 )
 
-// The conversation ladder must be absolute px derived from the content slider.
-assert.match(sheet, /--dsh-font-markdown-h1:700 calc\(16px \+ 7px\) \/ calc\(16px \+ 16px\)/)
-assert.match(sheet, /--dsh-font-markdown-base:var\(--dsh-font-conversation-size,14px\) \/ calc\(16px \+ 10px\)/)
 assert.match(sheet, /--dsw-font-markdown-code-block-font-size:var\(--dsh-font-code-size,12px\) !important;/)
 
 // The code weight has no design-system token of its own, so it rides in the
@@ -331,10 +331,12 @@ assert.ok(
   'the code weight must not be applied to every element',
 )
 
-// A different content size must move the ladder, not just the base variable.
-const bigger = plugin.fontStyleSheet({ ...section, contentFontSize: 20 })
-assert.match(bigger, /--dsh-font-markdown-h1:700 calc\(20px \+ 7px\) \/ calc\(20px \+ 16px\)/)
-assert.notEqual(bigger, sheet)
+// A different code size must move the code ladder, not just its base variable —
+// and it must leave the interface scale's classes alone.
+const smaller = plugin.fontStyleSheet({ ...section, codeFontSize: 16 })
+assert.match(smaller, /--dsh-font-code-size:16px;/)
+assert.match(smaller, /\.dsh-font-size-14\{font-size:calc\(14px \* var\(--dsh-font-ui-scale,1\)\)/)
+assert.notEqual(smaller, sheet)
 
 // ── applyFonts against a DOM stub ───────────────────────────────────────────
 const appended = []
@@ -385,17 +387,25 @@ assert.equal(
 assert.match(styleTags[0].textContent, /\.dsh-font-size-14\{/)
 assert.equal(rootProperties.get('--dsw-font-family'), 'Inter, sans-serif')
 assert.equal(rootProperties.get('--ds-font-family-code'), '"JetBrains Mono", monospace')
-// The content size must be written where ui-layout writes it, or the inline
-// presenter value would win over the stylesheet.
-assert.equal(bodyProperties.get('--dsh-content-font-size'), '16px')
+// Nothing of the conversation's is written here: `--dsh-content-font-size` is
+// ui-layout's inline property, and the plugin no longer competes for it.
+assert.equal(
+  bodyProperties.get('--dsh-content-font-size'),
+  undefined,
+  'the conversation size belongs to ui-theme',
+)
 
 // Re-applying must rewrite the same tag, not accumulate stylesheets, and a
 // changed weight must reach the sheet.
-plugin.applyFonts({ ...section, contentFontSize: 18, uiFontScale: 1, codeFontWeight: 700 })
+plugin.applyFonts({ ...section, uiFontScale: 1, codeFontWeight: 700 })
 assert.equal(styleTags.length, 1, 'applyFonts must reuse its own stylesheet tag')
 assert.match(styleTags[0].textContent, /--dsh-font-ui-scale:1;/)
 assert.match(styleTags[0].textContent, /--dsh-font-code-weight:700;/)
-assert.equal(bodyProperties.get('--dsh-content-font-size'), '18px')
+assert.equal(
+  bodyProperties.get('--dsh-content-font-size'),
+  undefined,
+  're-applying must not start writing it either',
+)
 
 // An unreadable stored weight must fall back to the shipped one rather than
 // writing an invalid declaration into every code `font:` shorthand.
@@ -1231,15 +1241,8 @@ assert.deepEqual(plugin.moveFontQueryEntry('Inter, monospace, "Fira Code"', 26, 
   assert.deepEqual(writes, ['monospace, Inter'], 'and must not write the setting')
 }
 // ── the interface weight, which is opted into ───────────────────────────────
-// The interface has a weight hierarchy, so setting the base has to move the
-// heading steps with it rather than flatten them — and the shipped 400 must
-// emit nothing at all, keeping a default install's sheet byte-identical.
-assert.equal(plugin.emphasisWeight(700, 400), 700)
-assert.equal(plugin.emphasisWeight(700, 500), 800)
-assert.equal(plugin.emphasisWeight(600, 500), 700)
-assert.equal(plugin.emphasisWeight(500, 500), 600)
-assert.equal(plugin.emphasisWeight(700, 100), 700)
-assert.equal(plugin.emphasisWeight(700, 900), 900)
+// Setting the base moves the text that inherits its weight, and the shipped 400
+// must emit nothing at all, keeping a default install's sheet byte-identical.
 {
   const plain = plugin.fontStyleSheet({ ...section, uiFontWeight: 400 })
   assert.equal(plain, sheet, 'the shipped interface weight must change nothing')
@@ -1247,11 +1250,6 @@ assert.equal(plugin.emphasisWeight(700, 900), 900)
 
   const heavy = plugin.fontStyleSheet({ ...section, uiFontWeight: 500 })
   assert.match(heavy, /html body\{font-weight:500\}/)
-  assert.match(heavy, /--dsh-font-markdown-base:500 var\(--dsh-font-conversation-size,14px\)/)
-  assert.match(heavy, /--dsh-font-markdown-table:500 calc\(16px - 1px\)/)
-  assert.match(heavy, /--dsh-font-markdown-h1:800 calc\(16px \+ 7px\)/)
-  assert.match(heavy, /--dsh-font-markdown-h4:700 var\(--dsh-font-conversation-size,14px\)/)
-  assert.match(heavy, /--dsh-font-markdown-table-head:600 calc\(16px - 1px\)/)
   // The code ladder is a different axis and must not move with it.
   assert.match(heavy, /--dsw-font-markdown-code:var\(--dsh-font-code-weight,400\)/)
 }
@@ -1824,7 +1822,16 @@ const collect = (node) => {
   const children = Array.isArray(node.children) ? node.children : [node.children]
   for (const child of children) collect(child)
   collect(node.props?.children)
-  for (const key of ['label', 'value', 'hint', 'ariaLabel', 'placeholder']) {
+  for (const key of [
+    'label',
+    'value',
+    'hint',
+    'aside',
+    'ariaLabel',
+    'aria-label',
+    'title',
+    'placeholder',
+  ]) {
     collect(node.props?.[key])
   }
 }
@@ -1834,11 +1841,15 @@ for (const key of [
   'font.uiFamily',
   'font.codeFamily',
   'font.uiScale',
-  'font.contentSize',
   'font.codeSize',
   'font.reset',
 ]) {
   assert.ok(labels.includes(key), `rendered row is missing ${key}`)
+}
+// The conversation size is `ui-theme`'s row now, and this one must not offer a
+// second control for it — nor the copy that names it.
+for (const gone of ['font.contentSize', 'font.contentSizeHint']) {
+  assert.ok(!labels.includes(gone), `the row must no longer offer ${gone}`)
 }
 
 // The catalogue's provenance is announced once, and only when it is bad news:
@@ -1931,6 +1942,94 @@ for (const key of [
   // Both axes share the machine's catalogue, faces included.
   assert.equal(ui.props.styles, code.props.styles)
   assert.ok(Array.isArray(code.props.catalogue))
+}
+
+// ── the size boxes, one per font field ──────────────────────────────────────
+//
+// The size is a plain `number` input sitting after the query editor, in the same
+// field, and it edits the unit the axis is stated in: whole percent for the
+// interface scale, px for code. What is stored is the multiplier for the first
+// and the px count for the second, so the box is the only place the conversion
+// lives — and the two rules that keep it honest (a half-typed value is not an
+// instruction; a refused one does not stay on screen) are asserted here.
+{
+  const boxes = collectElements(rendered).filter(
+    (element) => element.type === 'input' && element.props.type === 'number',
+  )
+  assert.equal(boxes.length, 2, 'one size box per font field')
+
+  const [scale, code] = boxes
+  assert.equal(scale.props.value, 125, 'the interface scale is shown as whole percent')
+  assert.equal(scale.props.min, 75)
+  assert.equal(scale.props.max, 150)
+  assert.equal(scale.props.step, 1, 'every whole percent in range is on-step')
+  assert.equal(scale.props['aria-label'], 'font.uiScale')
+  assert.equal(scale.props.title, 'font.uiScaleHint')
+  assert.equal(scale.props.inputMode, 'numeric')
+
+  assert.equal(code.props.value, 13)
+  assert.equal(code.props.min, 10)
+  assert.equal(code.props.max, 20)
+  assert.equal(code.props.step, 1)
+  assert.equal(code.props['aria-label'], 'font.codeSize')
+  assert.equal(code.props.title, 'font.codeSizeHint')
+
+  // Each box states its unit, so a bare number is never ambiguous — the unit is
+  // the sibling of the input inside the box.
+  const rows = collectElements(rendered).filter(
+    (element) => element.props.className === 'dsh-font-size',
+  )
+  assert.equal(rows.length, 2, 'one size box per font field')
+  const unitOf = (row) =>
+    (row.children ?? [])
+      .filter((child) => typeof child === 'object' && child?.props?.className === 'dsh-font-sizeUnit')
+      .flatMap((child) => child.children ?? [])
+  assert.ok(unitOf(rows[0]).includes('%'), 'the interface box states percent')
+  assert.ok(unitOf(rows[1]).includes('font.unit'), 'the code box states its unit')
+
+  const type = (box, value) => box.props.onChange({ target: { value } })
+  const blur = (box, value) => {
+    const target = { value }
+    box.props.onBlur({ target })
+    return target.value
+  }
+
+  type(scale, '120')
+  type(scale, '80')
+  type(scale, '99')
+  assert.deepEqual(writes.slice(-3), [
+    ['uiFontScale', 1.2],
+    ['uiFontScale', 0.8],
+    ['uiFontScale', 0.99],
+  ])
+
+  // A value the box would have to refuse writes nothing: out of range, empty, and
+  // not a number at all.
+  const before = writes.length
+  type(scale, '200')
+  type(scale, '74')
+  type(scale, '')
+  type(scale, 'wobble')
+  type(scale, '125')
+  assert.equal(writes.length, before, 'only a complete, in-range change is a write')
+
+  type(code, '14')
+  type(code, '20')
+  assert.deepEqual(writes.slice(-2), [
+    ['codeFontSize', 14],
+    ['codeFontSize', 20],
+  ])
+
+  const codeBefore = writes.length
+  type(code, '9')
+  type(code, '21')
+  type(code, '13')
+  assert.equal(writes.length, codeBefore, 'the code box is bounded the same way')
+
+  // Leaving the box puts it back to what is stored, so a refused number cannot
+  // stay on screen looking accepted.
+  assert.equal(blur(scale, '200'), '125')
+  assert.equal(blur(code, '9'), '13')
 }
 
 // A pushed settings change must repaint.
@@ -2105,14 +2204,26 @@ assert.equal(rootProperties.get('--dsw-font-family'), section.uiFontFamily)
   )
 
   // And the row's writes land on the form, field by field, with reset clearing
-  // every field the plugin owns.
+  // every field the plugin owns — the two families, the two weights, and the two
+  // sizes, and nothing else (the conversation size is `ui-theme`'s field).
   const actions = formSlots[0].inject(formSlots[0].store.create())
   actions.setField('uiFontFamily', 'Georgia, serif')
   actions.reset()
   assert.deepEqual(formWrites[0], { op: 'set', field: 'uiFontFamily', value: 'Georgia, serif' })
-  assert.ok(
-    formWrites.filter((write) => write.op === 'unset').length >= 7,
-    'reset must clear every field this plugin owns',
+  assert.deepEqual(
+    formWrites
+      .filter((write) => write.op === 'unset')
+      .map((write) => write.field)
+      .sort(),
+    [
+      'codeFontFamily',
+      'codeFontSize',
+      'codeFontWeight',
+      'uiFontFamily',
+      'uiFontScale',
+      'uiFontWeight',
+    ],
+    'reset must clear exactly the fields this plugin owns',
   )
 }
 
