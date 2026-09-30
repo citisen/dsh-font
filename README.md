@@ -77,11 +77,11 @@ borrows no icon now, and draws none of its own either — it is two text boxes, 
 boxes, and a button — which is why its client bundle asks the shell for nothing but
 `react` and `@deepseek-ai/dsh-client-store`.
 
-### `0.3.0`: the conversation text size is gone
+### `0.3.1`: the conversation text size is gone
 
 Message bodies, headings, and tables are sized by dsh's own *Appearance → Font size* row
 again (`ui-theme` writes the inline `--dsh-content-font-size` the shipped ladder reads).
-`0.3.0` stopped writing that property and stopped re-deriving the Markdown ladder, so the
+`0.3.1` stopped writing that property and stopped re-deriving the Markdown ladder, so the
 Fonts row offers no conversation-size control at all and `contentFontSize` has left the
 schema — **if an older version of this plugin stored it, delete that key** from
 `$DSH_HOME/settings.yaml` or the profile's `cordis.patch.yml`: dsh validates the section
@@ -139,7 +139,7 @@ looking as if it had been taken.
 
 **The conversation text size is not here.** Message bodies, headings, and tables have
 always been sized by dsh's own *Settings → Appearance → Font size* row (the `ui-theme`
-namespace); `0.3.0` removed the second control this row used to offer for it, and the
+namespace); `0.3.1` removed the second control this row used to offer for it, and the
 plugin writes no `--dsh-content-font-size` of its own.
 
 Both font fields are **editors for a small font-query language**, not plain text

@@ -20,6 +20,9 @@
  *      package.json `files`, every packed path must be a git-tracked file (or
  *      a declared build output), size cap, exports targets really exist
  *   7. prints the tarball inventory and its sha512 as release evidence
+ *   8. the staging command names the tarball as a LOCAL path (`./pkg/…`): a bare
+ *      `pkg/…` is parsed by npm as the GitHub shorthand `owner/repo` and refused
+ *      with EALLOWGIT, which is how 0.3.0's staging failed
  *
  * The evidence is the point of 6+7: the staging job re-hashes the same bytes
  * and refuses to stage anything else, and the integrity printed here is what
@@ -280,6 +283,41 @@ const evidence = {
   files: packed,
 }
 const evidencePath = resolve(process.env.RELEASE_EVIDENCE ?? join(root, 'release-evidence.json'))
+
+/* 8) the staging command must name the tarball as a local path ------------ */
+// `npm stage publish pkg/name.tgz` is not a path as far as npm is concerned: the
+// argument is a package SPEC, and a bare `owner/repo`-shaped one is the GitHub
+// shorthand. npm then tries to fetch `github:pkg/name.tgz` and refuses with
+// EALLOWGIT, which is exactly how the 0.3.0 release failed to stage (#14 shipped
+// the bare form). Only a `./`-prefixed path is read as the local tarball the
+// build job fingerprinted, so the shape is asserted here rather than trusted.
+{
+  const workflowPath = join(root, '.github', 'workflows', 'stage.yml')
+  let stageArgument
+  try {
+    const workflow = readFileSync(workflowPath, 'utf8')
+    const commands = workflow
+      .split('\n')
+      .map((line) => line.trim())
+      // The command itself, not the `--help` probe or the echo that reports it.
+      .filter((line) => line.startsWith('npm stage publish') && !line.includes('--help'))
+    if (commands.length !== 1) {
+      fail(`stage.yml should carry exactly one staging command, found ${commands.length}`)
+    } else {
+      stageArgument = commands[0].replace('npm stage publish', '').trim()
+      if (/^["']?\.\//.test(stageArgument)) {
+        pass(`the staging command names the tarball as a local path (${stageArgument})`)
+      } else {
+        fail(
+          `stage.yml stages "${stageArgument}": npm parses that as a package spec, not a file, ` +
+            'so a bare pkg/… path is refused with EALLOWGIT. Prefix it with ./',
+        )
+      }
+    }
+  } catch (error) {
+    fail(`could not read ${workflowPath} to check the staging command: ${error.message}`)
+  }
+}
 
 /* result ------------------------------------------------------------------ */
 for (const line of passed) console.log(`  ok   ${line}`)

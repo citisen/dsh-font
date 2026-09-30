@@ -224,7 +224,15 @@ jobs:
           # A duplicate version or stage is refused by the registry itself —
           # `npm stage list` cannot be used as a pre-check, it needs a token
           # read credential this workflow does not have.
-          npm stage publish "$(ls pkg/*.tgz)" \
+          #
+          # The `./` is load-bearing, and this is not style: npm parses the
+          # argument as a package SPEC, and a bare `pkg/name.tgz` looks exactly
+          # like the GitHub shorthand `owner/repo`. It then refuses with
+          # `EALLOWGIT — Refusing to fetch "github:pkg/name.tgz"`, which is how
+          # 0.3.0's staging failed. A `./`-prefixed path is read as the local
+          # tarball the build job fingerprinted. verify-release.mjs check 8
+          # fails the build job if this prefix ever goes away.
+          npm stage publish "./$(ls pkg/*.tgz)" \
             --ignore-scripts \
             --tag "$DIST_TAG" \
             --access public \

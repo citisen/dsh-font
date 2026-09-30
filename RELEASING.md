@@ -4,11 +4,20 @@ The runbook for changing the plugin and getting it to users. For the *why*
 behind the setup (and what it does not protect against), see
 [PUBLISHING.md](PUBLISHING.md).
 
-The next version to ship is **0.3.0** — the published `latest` is `0.2.4`
+The next version to ship is **0.3.1** — the published `latest` is `0.2.4`
 (`0.2.0` … `0.2.4` are on the registry; `0.2.3` was staged and rejected, so that
 number is burned).
 
-`0.3.0` hands the conversation text size back to dsh's own *Appearance → Font size*
+`0.3.0` was tagged and **never published**, and that number is burned with it: the
+staging job's `npm stage publish "$(ls pkg/*.tgz)"` argument — introduced by #14 —
+is a bare relative path, which npm parses as the GitHub shorthand `owner/repo`
+(`EALLOWGIT — Refusing to fetch "github:pkg/citisen-dsh-font-0.3.0.tgz"`). The fix is
+the `./` prefix in `stage.yml`, and `.github/scripts/verify-release.mjs` check 8 now
+fails the build job if it ever goes away. Any commit after a tag breaks the `latest`
+tag check (`v<version>` must point at HEAD) and `refs/tags/v*` is protected against
+update and deletion, so the release moves on to `0.3.1` rather than re-tagging.
+
+`0.3.1` hands the conversation text size back to dsh's own *Appearance → Font size*
 row. The plugin stops writing `--dsh-content-font-size`, stops re-deriving the
 Markdown ladder and drops `contentFontSize` from the schema, so **anyone who set that
 field on an older version has to delete the key** from `$DSH_HOME/settings.yaml` or the
